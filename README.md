@@ -13,3 +13,7 @@ Cause I hate Python (I haven't written Python in months and I'm just too lazy to
 ## How do I run it?
 
 idk I haven't figured that out yet either lmao
+
+## Why Make This?
+
+Because I like Syrian Drama and I think it should be more accessable to non-Arabic speakers.

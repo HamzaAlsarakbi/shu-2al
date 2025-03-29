@@ -69,7 +69,12 @@ impl Subtitle {
             .nth(1)
             .ok_or("Invalid end timestamp")?
             .to_string();
+
         let text = lines[ts_i + 1].trim().to_string();
+
+        if start_time == "00:03:11,080" {
+            tracing::info!("text: {:?}, empty {}", text, text.is_empty());
+        }
 
         let subtitle = Subtitle {
             start_time: Timestamp::from_string(&start_time)?,

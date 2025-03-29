@@ -5,7 +5,7 @@ use std::{
 
 use super::subtitle::Subtitle;
 
-struct SRT {
+pub struct SRT {
     file_path: String,
     /// The list of subtitles in the SRT file.
     subtitles: Vec<Subtitle>,
@@ -39,9 +39,12 @@ impl SRT {
         let mut lines: Vec<String> = Vec::new();
         for line in reader.lines() {
             let line = line.map_err(|e| e.to_string())?;
-            if line.trim().is_empty() {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                lines.clear();
                 continue;
             }
+
             lines.push(line);
 
             if lines.len() > 1 {
@@ -51,8 +54,10 @@ impl SRT {
                 }
             }
         }
+
         Ok(())
     }
+
     /// Writes the subtitles to the SRT file.
     ///
     /// # Arguments
