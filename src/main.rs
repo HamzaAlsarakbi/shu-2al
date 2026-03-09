@@ -1,8 +1,12 @@
 use std::env;
 
-use srt::srt::SRT;
+use core::srt::SRT;
 
-mod srt;
+mod core;
+mod modules;
+mod pipeline;
+mod source;
+mod target;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

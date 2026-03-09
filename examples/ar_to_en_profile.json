@@ -1,0 +1,58 @@
+{
+    "name": "Base English Profile",
+    "id": "en_base",
+    "description": "A profile for English language support.",
+    "version": "1.0",
+    "pipeline": {
+        "source": {
+            "type": "model",
+            "model": "whisper"
+        },
+        "modules": [
+            {
+                "name": "model",
+                "enabled": true,
+                "model": "whisper",
+                "source": {
+                    "type": "file",
+                    "file_path": "/path/to/my/audio/file.mp3"
+                },
+                "language": "Arabic",
+                "model_type": "largev3",
+                "max_line_count": 2,
+                "max_line_length": 50,
+                "beam_size": 10,
+                "word_timestamps": true,
+                "hallucination_silence_threshold": 5
+            },
+            {
+                "name": "filter",
+                "enabled": true,
+                "max_line_count": 2,
+                "max_line_length": 50,
+                "word_timestamps": true,
+                "hallucination_silence_threshold": 5
+            },
+            {
+                "name": "filter",
+                "enabled": true,
+                "remove_empty_lines": true,
+                "words_list": [
+                    "شتركوا في القناة",
+                    "لا تنسوا الاشتراك في القناة",
+                    "لا تنسوا الاشتراك",
+                    "المترجم للقناة",
+                    "موسيقى"
+                ]
+            },
+            {
+                "name": "synchronizer",
+                "enabled": true
+            }
+        ],
+        "target": {
+            "enabled": true,
+            "output_path": "./path/to/target/english_subtitles.srt"
+        }
+    }
+}

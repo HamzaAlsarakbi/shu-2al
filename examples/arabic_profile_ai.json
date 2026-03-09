@@ -1,0 +1,41 @@
+{
+    "name": "Base Arabic Profile",
+    "id": "ar_base",
+    "description": "A profile for Arabic language support.",
+    "version": "1.0",
+    "pipeline": {
+        "source": {
+            "type": "subtitle_file",
+            "file_path": "/path/to/my/srt/file.srt"
+        },
+        "modules": [
+            {
+                "name": "filter",
+                "enabled": true,
+                "remove_empty_lines": true,
+                "words_list": [
+                    "شتركوا في القناة",
+                    "لا تنسوا الاشتراك في القناة",
+                    "لا تنسوا الاشتراك",
+                    "المترجم للقناة",
+                    "موسيقى"
+                ]
+            },
+            {
+                "name": "synchronizer",
+                "enabled": true
+            },
+            {
+                "name": "translator",
+                "enabled": true,
+                "provider": "deepseek",
+                "source_language": "Arabic",
+                "target_language": "English"
+            }
+        ],
+        "target": {
+            "enabled": true,
+            "output_path": "./path/to/target/arabic_subtitles.srt"
+        }
+    }
+}
