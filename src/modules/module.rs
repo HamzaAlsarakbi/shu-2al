@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use crate::core::{error::SRTError, srt::SRT};
 
 pub trait Module {
@@ -10,5 +12,5 @@ pub trait Module {
     /// # Returns
     ///
     /// * `Result<&SRT, SRTError>` - Returns a reference to the processed SRT object if successful, or an error message if it fails.
-    fn process(input: &SRT) -> Result<&SRT, SRTError>;
+    fn process(&self, input: Arc<Mutex<SRT>>) -> Result<Arc<Mutex<SRT>>, SRTError>;
 }

@@ -3,6 +3,7 @@ use crate::core::srt::SRT;
 
 use super::source::{Source, SourceInput};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SRTLoader;
 
 impl Source for SRTLoader {
@@ -25,12 +26,35 @@ impl Source for SRTLoader {
 
 // TODO: Tests
 mod tests {
-    use crate::core::srt::SRT;
+    use crate::{
+        core::{subtitle::Subtitle, timestamp::Timestamp},
+        source::{
+            source::{Source, SourceInput},
+            srt_loader::SRTLoader,
+        },
+    };
 
     fn test_srt_loader() {
         let subtitles = vec![
-            
-        ]
-        let loaded = SRTLoader::process(SourceInput::SubtitleFile("examples/sample.srt".to_string()));
+            Subtitle {
+                index: 1,
+                start_time: Timestamp::from_string("00:00:01,000").unwrap(),
+                end_time: Timestamp::from_string("00:00:04,000").unwrap(),
+                text: "Hello, world!".to_string(),
+            },
+            Subtitle {
+                index: 2,
+                start_time: Timestamp::from_string("00:00:05,000").unwrap(),
+                end_time: Timestamp::from_string("00:00:08,000").unwrap(),
+                text: "This is a test.".to_string(),
+            },
+        ];
+
+        let result = SRTLoader::process(SourceInput::SubtitleFile(
+            "test_files/srt_loader/test1.srt".to_string(),
+        ))
+        .unwrap();
+
+        assert_eq!(result.subtitles, subtitles);
     }
 }

@@ -6,6 +6,7 @@ pub enum SRTError {
     SubtitleParseError(String),
     FileError(String),
     InvalidInput(String),
+    TimeError(String),
     Unknown,
 }
 
@@ -20,6 +21,7 @@ impl std::fmt::Display for SRTError {
             SRTError::FileError(msg) => write!(f, "File error: {}", msg),
             SRTError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
             SRTError::SubtitleParseError(msg) => write!(f, "Subtitle parse error: {}", msg),
+            SRTError::TimeError(msg) => write!(f, "Time error: {}", msg),
             SRTError::Unknown => write!(f, "An unknown error occurred"),
         }
     }

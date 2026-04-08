@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::core::error::SRTError;
+
 use super::direction::Direction;
 
 #[derive(Debug, Clone)]
@@ -103,15 +105,17 @@ impl Timestamp {
     /// # Returns
     ///
     /// * `Result<(), String>` - Returns `Ok(())` if successful, or an error message if it fails.
-    pub fn move_ts(&mut self, delta: &Duration, direction: &Direction) -> Result<(), String> {
+    pub fn move_ts(&mut self, delta: &Duration, direction: &Direction) -> Result<(), SRTError> {
         let total_milliseconds = self.to_millis() as i64;
 
         if total_milliseconds < 0 {
-            return Err("Timestamp cannot be negative".to_string());
+            return Err(SRTError::TimeError(
+                "Timestamp cannot be negative".to_string(),
+            ));
         }
 
         if delta.as_millis() > i64::MAX as u128 {
-            return Err("Duration is too large".to_string());
+            return Err(SRTError::TimeError("Duration is too large".to_string()));
         }
 
         let delta = match direction {

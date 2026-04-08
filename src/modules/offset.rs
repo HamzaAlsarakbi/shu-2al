@@ -1,10 +1,19 @@
-use crate::modules::module::Module;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use crate::{
+    core::{direction::Direction, srt::SRT},
+    modules::module::Module,
+};
 
 /// Offset module settings
 pub struct OffsetModule {
     enabled: bool,
     /// The offset in milliseconds to be applied to the subtitle timings.
-    offset_ms: i64,
+    offset: Duration,
+    direction: Direction,
 }
 
 impl Module for OffsetModule {
@@ -17,17 +26,20 @@ impl Module for OffsetModule {
     /// # Returns
     ///
     /// * `Result<&SRT, SRTError>` - Returns a reference to the processed SRT object if successful, or an error message if it fails.
-    fn process(input: &crate::core::srt::SRT) -> Result<&crate::core::srt::SRT, crate::core::error::SRTError> {
+    fn process(
+        &self,
+        input: Arc<Mutex<SRT>>,
+    ) -> Result<Arc<Mutex<SRT>>, crate::core::error::SRTError> {
         if !self.enabled {
             return Ok(input);
         }
 
-        let mut output = input.clone();
-        for subtitle in &mut output.subtitles {
-            subtitle.start_time = (subtitle.start_time as i64 + self.offset_ms) as u64;
-            subtitle.end_time = (subtitle.end_time as i64 + self.offset_ms) as u64;
+        let mut lock = input.lock().unwrap();
+        for subtitle in &mut lock.subtitles {
+            subtitle.start_time.move_ts(&self.offset, &self.direction)?;
+            subtitle.end_time.move_ts(&self.offset, &self.direction)?;
         }
-        Ok(&output)
+        drop(lock);
+        Ok(input)
     }
-
 }

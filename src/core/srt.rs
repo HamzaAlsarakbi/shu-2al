@@ -6,9 +6,9 @@ use std::{
 use super::{error::SRTError, subtitle::Subtitle};
 
 pub struct SRT {
-    file_path: String,
+    pub file_path: String,
     /// The list of subtitles in the SRT file.
-    subtitles: Vec<Subtitle>,
+    pub subtitles: Vec<Subtitle>,
 }
 
 impl SRT {

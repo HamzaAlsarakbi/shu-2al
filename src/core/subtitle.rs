@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::core::error::SRTError;
+
 use super::{direction::Direction, timestamp::Timestamp};
 
 /// This module provides functionality to clean and format SRT (SubRip Subtitle) files.
@@ -9,18 +11,21 @@ use super::{direction::Direction, timestamp::Timestamp};
 /// Represents a subtitle entry with start time, end time, and text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subtitle {
+    /// Index of the subtitle (not used in processing, but can be useful for reference)
+    pub index: usize,
     /// Start time of the subtitle in the format "HH:MM:SS,ms"
-    start_time: Timestamp,
+    pub start_time: Timestamp,
     /// End time of the subtitle in the format "HH:MM:SS,ms"
-    end_time: Timestamp,
+    pub end_time: Timestamp,
     /// Text of the subtitle
-    text: String,
+    pub text: String,
 }
 
 #[cfg(test)]
 impl Default for Subtitle {
     fn default() -> Self {
         Subtitle {
+            index: 0,
             start_time: Timestamp::from_string("00:00:01,000").unwrap(),
             end_time: Timestamp::from_string("00:00:05,000").unwrap(),
             text: "Hello, World!".to_string(),
@@ -78,6 +83,7 @@ impl Subtitle {
         }
 
         let subtitle = Subtitle {
+            index: 0,
             start_time: Timestamp::from_string(&start_time)?,
             end_time: Timestamp::from_string(&end_time)?,
             text,
@@ -135,13 +141,13 @@ impl Subtitle {
         Duration::from_millis(end_time - start_time)
     }
 
-    pub fn move_start(&mut self, delta: &Duration, direction: &Direction) -> Result<(), String> {
+    pub fn move_start(&mut self, delta: &Duration, direction: &Direction) -> Result<(), SRTError> {
         self.start_time.move_ts(delta, direction)
     }
-    pub fn move_end(&mut self, delta: &Duration, direction: &Direction) -> Result<(), String> {
+    pub fn move_end(&mut self, delta: &Duration, direction: &Direction) -> Result<(), SRTError> {
         self.end_time.move_ts(delta, direction)
     }
-    pub fn offset(&mut self, delta: &Duration, direction: &Direction) -> Result<(), String> {
+    pub fn offset(&mut self, delta: &Duration, direction: &Direction) -> Result<(), SRTError> {
         self.move_start(delta, direction)?;
         self.move_end(delta, direction)?;
         Ok(())
@@ -204,6 +210,7 @@ mod tests {
     #[test]
     fn test_subtitle_to_string() {
         let subtitle = Subtitle {
+            index: 0,
             start_time: Timestamp::from_string("00:00:01,000").unwrap(),
             end_time: Timestamp::from_string("00:00:05,000").unwrap(),
             text: "Hello, World!".to_string(),
@@ -253,6 +260,7 @@ mod tests {
     #[test]
     fn test_subtitle_duration() {
         let subtitle = Subtitle {
+            index: 0,
             start_time: Timestamp::from_string("00:00:01,000").unwrap(),
             end_time: Timestamp::from_string("00:00:05,000").unwrap(),
             text: "Hello, World!".to_string(),
