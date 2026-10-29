@@ -6,6 +6,10 @@ Shu 2al is a subtitle generating and translating project. You can load a YouTube
 
 All you need is a powerful GPU, some time, and patience.
 
+> **v2 redesign in progress:** a self-hosted dashboard (Rust + Svelte, with a thin Python GPU worker) that downloads episodes, transcribes Syrian Arabic, translates to English, lets you fix the subs in a waveform editor, and publishes to Plex. See [docs/DESIGN.md](docs/DESIGN.md). The sections below describe the original prototype.
+>
+> Only process content you have the right to. Shu 2al never bypasses DRM.
+
 ## Why Rust?
 
 Cause I hate Python (I haven't written Python in months and I'm just too lazy to get back), and because I'm just too used to the Rust ecosystem.
