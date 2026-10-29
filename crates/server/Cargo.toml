@@ -10,7 +10,12 @@ license.workspace = true
 subs.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

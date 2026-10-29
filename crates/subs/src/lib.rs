@@ -7,6 +7,7 @@
 mod cue;
 mod error;
 pub mod filter;
+pub mod metrics;
 pub mod normalize;
 pub mod segment;
 pub mod srt;
