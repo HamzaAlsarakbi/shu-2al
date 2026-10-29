@@ -13,6 +13,8 @@ repository = "https://github.com/HamzaAlsarakbi/shu-2al"
 subs = { path = "crates/subs" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 
 [workspace.lints.rust]

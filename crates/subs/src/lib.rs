@@ -8,8 +8,10 @@ mod cue;
 mod error;
 pub mod filter;
 pub mod normalize;
+pub mod segment;
 pub mod srt;
 mod time;
+pub mod transcript;
 pub mod vtt;
 
 pub use cue::{Cue, shift_all};

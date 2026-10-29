@@ -33,6 +33,11 @@ enum SubsCommand {
     },
     /// Drop empty cues, known hallucination phrases and decoding loops.
     Clean { input: PathBuf, output: PathBuf },
+    /// Build filtered cues from a worker transcript.json.
+    Cues {
+        transcript: PathBuf,
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -59,6 +64,20 @@ fn run_subs(cmd: SubsCommand) -> Result<()> {
                 );
             }
             eprintln!("kept {}, dropped {}", kept.len(), dropped.len());
+            write(&output, &kept)
+        }
+        SubsCommand::Cues { transcript, output } => {
+            let json = std::fs::read_to_string(&transcript)
+                .with_context(|| format!("reading {}", transcript.display()))?;
+            let transcript: subs::transcript::Transcript =
+                serde_json::from_str(&json).context("parsing transcript")?;
+            let cues = subs::segment::cues_from_transcript(&transcript, &Default::default());
+            let (kept, dropped) = filter::apply(cues, &filter::Rules::default());
+            eprintln!(
+                "{} cues ({} dropped as hallucinations)",
+                kept.len(),
+                dropped.len()
+            );
             write(&output, &kept)
         }
     }

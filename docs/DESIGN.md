@@ -682,7 +682,7 @@ en_fit = true
 | Rate limits during development (seen during this research) | Mock worker mode; fixtures; record/replay of LLM responses in tests. |
 
 **Open, to settle during M1/M3 (none block M0):**
-1. **Default translation model.** *Decided (2026-10-29):* in M1, run Opus 5.5, Sonnet 5.5 and Haiku 5.5 on the same first episode and compare them in the editor. The default is set from that comparison. Until then the profile says `claude-opus-5-5`.
+1. **Translation backend.** *Decided (2026-10-29):* **local only**, Qwen3.5-9B Q4_K_M via llama-server on the 3070, with JSON-schema-constrained output and thinking off. This avoids per-token cost and any question of subscription terms: Claude Max and ChatGPT plans don't include API credits, and scripting `claude -p` on a subscription isn't clearly permitted. API providers (§5.5) remain an optional backend if local quality disappoints.
 2. The orthography convention table (§5.6): confirm it after reviewing the first episode.
 3. Whether to pass character names as an ASR prompt (depends on Cohere's API support).
 4. Whether to enable separation per show once the CER data exists.
