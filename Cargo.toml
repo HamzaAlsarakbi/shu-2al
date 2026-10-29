@@ -1,10 +1,19 @@
-[package]
-name = "shu-2al"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
 
-[dependencies]
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/HamzaAlsarakbi/shu-2al"
+
+[workspace.dependencies]
+subs = { path = "crates/subs" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

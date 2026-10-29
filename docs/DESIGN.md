@@ -583,7 +583,7 @@ shu-2al/
   deploy/                     # compose.yaml, server.Dockerfile, worker.Dockerfile, config.example.toml
   .github/workflows/          # ci.yml, release.yml
   docs/DESIGN.md  docs/research/
-  test_files/                 # existing fixtures + new edge cases
+  crates/subs/tests/fixtures/ # real Whisper/Arabic SRT fixtures
 ```
 
 **Salvage verdict** (architecture.md §1): **about 900 of the 1,644 lines survive** inside `crates/subs`. These are the timestamp, cue, filter and offset logic, their 28 tests, the fixtures and the hallucination-phrase list.
