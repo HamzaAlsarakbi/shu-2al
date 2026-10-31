@@ -707,6 +707,24 @@ en_fit = true
 - The NLLB `mt` stage and `train_mt` stay as experiments. They become worth retrying once the editor has produced corrected pairs from real episodes.
 - The biggest remaining quality lever is the owner's own corrections: per-show glossary and few-shot examples (M3/M5).
 
+### M2 status (2026-10-31)
+
+**Built:**
+- `shu2al serve`: axum JSON API + SSE, SQLite queue, title parser, gaming guard.
+- Svelte 5 dashboard with Queue and New request pages. Requests come from a URL, a playlist, a YouTube search, or a file path on the server.
+
+**How the queue schedules:**
+- Lanes: gpu = 1, io = 2, cpu = 4.
+- GPU stages wait while the GPU is paused or while other apps use more than 1200 MiB of VRAM.
+- `gpu_contention` failures requeue after 2 minutes without using an attempt.
+- Other failures retry once after 30 s; fetch gets 4 attempts.
+
+**Deviations from the plan, for now:**
+- The server runs natively on the Arch box (`~/shu2al-data/start-server.sh`) and spawns worker and llama-server containers itself. Compose packaging and the `runner` service are deferred until we need them.
+- The frontend is plain Vite + Svelte with hash routing instead of SvelteKit. It has fewer moving parts and is enough for these pages.
+- Cancel stops scheduling but lets a running stage finish.
+- The downloaded source is kept after extract, so the M3 editor can build its video proxy from it.
+
 ## 14. Risks and open items
 
 | Risk | Mitigation |

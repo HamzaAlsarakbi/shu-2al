@@ -16,6 +16,11 @@ thiserror.workspace = true
 dotenvy.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
+axum.workspace = true
+regex.workspace = true
+sqlx.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true
 
 [lints]
 workspace = true

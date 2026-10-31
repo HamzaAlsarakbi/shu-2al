@@ -2,8 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod api;
+mod db;
 mod llm;
 mod pipeline;
+mod queue;
+mod titles;
 mod translate;
 mod worker;
 
@@ -25,6 +29,33 @@ enum Command {
     Subs(SubsCommand),
     /// Subtitle one episode end to end: writes <work>/out/<name>.{ar,en}.srt.
     Run(Box<RunArgs>),
+    /// Run the dashboard server and job queue.
+    Serve(ServeArgs),
+}
+
+#[derive(clap::Args)]
+struct ServeArgs {
+    /// Address to listen on. Keep it on localhost/LAN/Tailscale; there is no auth.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    bind: String,
+    /// Data directory (database and episode work dirs). Default: ~/shu2al-data/library
+    #[arg(long)]
+    data: Option<PathBuf>,
+    /// Model cache. Default: ~/shu2al-models
+    #[arg(long)]
+    models: Option<PathBuf>,
+    /// Built web app to serve.
+    #[arg(long, default_value = "web/dist")]
+    web: PathBuf,
+    #[arg(long, default_value = "shu2al-worker:dev")]
+    worker_image: String,
+    #[arg(long, default_value = "ghcr.io/ggml-org/llama.cpp:server-cuda")]
+    llm_image: String,
+    #[arg(long, default_value_t = 8081)]
+    llm_port: u16,
+    /// Hold GPU stages while other apps use more than this much VRAM (MiB).
+    #[arg(long, default_value_t = 1200)]
+    gpu_busy_mb: u64,
 }
 
 #[derive(clap::Args)]
@@ -102,6 +133,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Subs(cmd) => run_subs(cmd),
         Command::Run(args) => run_episode(*args).await,
+        Command::Serve(args) => serve(args).await,
     }
 }
 
@@ -221,14 +253,52 @@ async fn run_episode(args: RunArgs) -> Result<()> {
             extra: args.llm_args,
         },
     };
-    pipeline::run(pipeline::Options {
-        media: args.media,
-        work,
-        name,
-        from: args.from,
-        launcher,
-        models,
-        llm,
-    })
+    pipeline::run(
+        pipeline::Options {
+            media: args.media,
+            work,
+            name,
+            launcher,
+            models,
+            llm,
+        },
+        args.from,
+    )
     .await
+}
+
+fn home_dir(sub: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(std::env::var("HOME").context("HOME is not set")?).join(sub))
+}
+
+async fn serve(args: ServeArgs) -> Result<()> {
+    let data = match args.data {
+        Some(d) => d,
+        None => home_dir("shu2al-data/library")?,
+    };
+    std::fs::create_dir_all(&data)?;
+    let data = data.canonicalize()?;
+    let models = match args.models {
+        Some(m) => m,
+        None => home_dir("shu2al-models")?,
+    };
+    let pool = db::open(&data.join("shu2al.db")).await?;
+    let queue = queue::Queue::new(
+        pool,
+        queue::Config {
+            data,
+            models: models.canonicalize().unwrap_or(models),
+            worker_image: args.worker_image,
+            llm_image: args.llm_image,
+            llm_port: args.llm_port,
+            gpu_busy_mb: args.gpu_busy_mb,
+        },
+    )
+    .await?;
+    tokio::spawn(queue.clone().run());
+    let app = api::router(queue, args.web);
+    let listener = tokio::net::TcpListener::bind(&args.bind).await?;
+    eprintln!("shu2al listening on http://{}", args.bind);
+    axum::serve(listener, app).await?;
+    Ok(())
 }

@@ -1,8 +1,10 @@
-//! `shu2al run`: the hard-coded workflow for one episode, start to finish.
+//! The hard-coded workflow for one episode:
+//! extract → asr → align → cues → translate → render.
 //!
-//! extract → asr → align → cues → translate → render. Every stage writes its
-//! output into the work directory and is skipped next time if that output
-//! exists, unless `--from` asks to redo it and everything after.
+//! Every stage reads and writes files in the episode's work directory, so the
+//! CLI (`shu2al run`) and the server's queue run the same code: the CLI loops
+//! over [`Stage::ALL`], the queue schedules one [`run_stage`] at a time per
+//! lane (GPU stages strictly one at a time).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use crate::llm::Lease;
 use crate::translate::{self, Translated};
 use crate::worker::Launcher;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
 pub enum Stage {
     Extract,
     Asr,
@@ -25,6 +27,32 @@ pub enum Stage {
     Cues,
     Translate,
     Render,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 6] = [
+        Stage::Extract,
+        Stage::Asr,
+        Stage::Align,
+        Stage::Cues,
+        Stage::Translate,
+        Stage::Render,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Extract => "extract",
+            Stage::Asr => "asr",
+            Stage::Align => "align",
+            Stage::Cues => "cues",
+            Stage::Translate => "translate",
+            Stage::Render => "render",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
 }
 
 pub enum Llm {
@@ -44,28 +72,28 @@ pub enum Llm {
 }
 
 pub struct Options {
+    /// Source media for `extract`.
     pub media: PathBuf,
     pub work: PathBuf,
     pub name: String,
-    pub from: Option<Stage>,
     pub launcher: Launcher,
     pub models: PathBuf,
     pub llm: Llm,
 }
 
-struct Paths {
-    audio: PathBuf,
-    asr_dir: PathBuf,
-    transcript: PathBuf,
-    aligned: PathBuf,
-    cues: PathBuf,
-    translation: PathBuf,
-    out_ar: PathBuf,
-    out_en: PathBuf,
+pub struct Paths {
+    pub audio: PathBuf,
+    pub asr_dir: PathBuf,
+    pub transcript: PathBuf,
+    pub aligned: PathBuf,
+    pub cues: PathBuf,
+    pub translation: PathBuf,
+    pub out_ar: PathBuf,
+    pub out_en: PathBuf,
 }
 
 impl Paths {
-    fn new(work: &Path, name: &str) -> Self {
+    pub fn new(work: &Path, name: &str) -> Self {
         let asr_dir = work.join("asr");
         Self {
             audio: work.join("audio.16k.flac"),
@@ -78,109 +106,145 @@ impl Paths {
             out_en: work.join("out").join(format!("{name}.en.srt")),
         }
     }
+
+    /// The file a stage produces; its existence means the stage is done.
+    pub fn output(&self, stage: Stage) -> &Path {
+        match stage {
+            Stage::Extract => &self.audio,
+            Stage::Asr => &self.transcript,
+            Stage::Align => &self.aligned,
+            Stage::Cues => &self.cues,
+            Stage::Translate => &self.translation,
+            Stage::Render => &self.out_en,
+        }
+    }
 }
 
-pub async fn run(opts: Options) -> Result<()> {
+/// `shu2al run`: every stage in order, skipping finished ones unless `from`
+/// asks to redo a stage and everything after it.
+pub async fn run(opts: Options, from: Option<Stage>) -> Result<()> {
     tokio::fs::create_dir_all(&opts.work).await?;
     let p = Paths::new(&opts.work, &opts.name);
-    let redo =
-        |stage: Stage, output: &Path| opts.from.is_some_and(|f| f <= stage) || !output.exists();
-    // Stats accumulate across runs, so a rerun of one stage keeps the others.
     let stats_path = opts.work.join("run.json");
     let mut stats: serde_json::Map<String, Value> = std::fs::read_to_string(&stats_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    if redo(Stage::Extract, &p.audio) {
+    for stage in Stage::ALL {
+        if from.is_none_or(|f| stage < f) && p.output(stage).exists() {
+            continue;
+        }
         let t = Instant::now();
-        extract_audio(&opts.media, &p.audio).await?;
-        stats.insert("extract".into(), json!({ "elapsed_s": secs(t) }));
-        done("extract", t);
+        let name = stage.name();
+        let progress = move |pct: f64, msg: &str| {
+            eprint!("\r  {name:<9} {pct:>5.1}%  {msg:<40}");
+            let _ = std::io::stderr().flush();
+        };
+        let result = run_stage(stage, &opts, &progress).await?;
+        eprintln!(
+            "\r  {name:<9} done in {:.1}s{:<40}",
+            t.elapsed().as_secs_f64(),
+            ""
+        );
+        stats.insert(name.into(), result);
     }
+    eprintln!("  wrote {} and {}", p.out_ar.display(), p.out_en.display());
+    tokio::fs::write(
+        &stats_path,
+        serde_json::to_vec_pretty(&Value::Object(stats))?,
+    )
+    .await?;
+    Ok(())
+}
 
-    if redo(Stage::Asr, &p.transcript) {
-        let t = Instant::now();
-        let result = opts
-            .launcher
-            .run(
-                "asr",
-                json!({ "audio": p.audio }),
-                &p.asr_dir,
-                json!({}),
-                progress("asr"),
+/// Runs exactly one stage and returns its stats. Inputs are the outputs of the
+/// earlier stages, already on disk.
+pub async fn run_stage(
+    stage: Stage,
+    opts: &Options,
+    progress: &(dyn Fn(f64, &str) + Sync),
+) -> Result<Value> {
+    tokio::fs::create_dir_all(&opts.work).await?;
+    let p = Paths::new(&opts.work, &opts.name);
+    let t = Instant::now();
+    match stage {
+        Stage::Extract => {
+            extract_audio(&opts.media, &p.audio).await?;
+            Ok(json!({ "elapsed_s": secs(t) }))
+        }
+        Stage::Asr => {
+            let result = opts
+                .launcher
+                .run(
+                    "asr",
+                    json!({ "audio": p.audio }),
+                    &p.asr_dir,
+                    json!({}),
+                    progress,
+                )
+                .await?;
+            Ok(with_elapsed(&result["stats"], t))
+        }
+        Stage::Align => {
+            let inputs = json!({ "audio": p.audio, "transcript": p.transcript });
+            let result = opts
+                .launcher
+                .run("align", inputs, &p.asr_dir, json!({}), progress)
+                .await?;
+            Ok(with_elapsed(&result["stats"], t))
+        }
+        Stage::Cues => {
+            let transcript: Transcript =
+                serde_json::from_str(&tokio::fs::read_to_string(&p.aligned).await?)
+                    .context("parsing aligned transcript")?;
+            let cues = segment::cues_from_transcript(&transcript, &segment::Rules::default());
+            let (kept, dropped) = filter::apply(cues, &filter::Rules::default());
+            tokio::fs::write(&p.cues, srt::write(&kept)).await?;
+            Ok(json!({ "cues": kept.len(), "dropped": dropped.len() }))
+        }
+        Stage::Translate => {
+            let cues = srt::parse(&tokio::fs::read_to_string(&p.cues).await?)?;
+            let (lines, report) = match &opts.llm {
+                Llm::Seq2Seq { model } => translate_seq2seq(opts, &cues, model, progress).await?,
+                Llm::External(_) | Llm::Docker { .. } => {
+                    let lease = match &opts.llm {
+                        Llm::Docker {
+                            image,
+                            gguf,
+                            port,
+                            extra,
+                        } => {
+                            progress(0.0, "starting llama-server");
+                            Lease::start(image, &opts.models, gguf, *port, extra).await?
+                        }
+                        Llm::External(url) => Lease::external(url),
+                        Llm::Seq2Seq { .. } => unreachable!(),
+                    };
+                    let outcome =
+                        translate::translate(&lease, &cues, &Default::default(), |n, total| {
+                            progress(
+                                100.0 * n as f64 / total.max(1) as f64,
+                                &format!("{n}/{total} cues"),
+                            )
+                        })
+                        .await;
+                    lease.stop().await;
+                    outcome?
+                }
+            };
+            let json_lines: Vec<Value> = lines
+                .iter()
+                .map(|l| json!({ "ar": l.ar, "en": l.en, "uncertain": l.uncertain, "overcorrected": l.overcorrected }))
+                .collect();
+            tokio::fs::write(
+                &p.translation,
+                serde_json::to_vec_pretty(&json!({ "lines": json_lines }))?,
             )
             .await?;
-        stats.insert("asr".into(), with_elapsed(&result["stats"], t));
-        done("asr", t);
-    }
-
-    if redo(Stage::Align, &p.aligned) {
-        let t = Instant::now();
-        let inputs = json!({ "audio": p.audio, "transcript": p.transcript });
-        let result = opts
-            .launcher
-            .run("align", inputs, &p.asr_dir, json!({}), progress("align"))
-            .await?;
-        stats.insert("align".into(), with_elapsed(&result["stats"], t));
-        done("align", t);
-    }
-
-    if redo(Stage::Cues, &p.cues) {
-        let t = Instant::now();
-        let transcript: Transcript =
-            serde_json::from_str(&tokio::fs::read_to_string(&p.aligned).await?)
-                .context("parsing aligned transcript")?;
-        let cues = segment::cues_from_transcript(&transcript, &segment::Rules::default());
-        let (kept, dropped) = filter::apply(cues, &filter::Rules::default());
-        tokio::fs::write(&p.cues, srt::write(&kept)).await?;
-        stats.insert(
-            "cues".into(),
-            json!({ "cues": kept.len(), "dropped": dropped.len() }),
-        );
-        done("cues", t);
-    }
-    let cues = srt::parse(&tokio::fs::read_to_string(&p.cues).await?)?;
-
-    if redo(Stage::Translate, &p.translation) {
-        let t = Instant::now();
-        let (lines, report) = match &opts.llm {
-            Llm::Seq2Seq { model } => translate_seq2seq(&opts, &cues, model).await?,
-            Llm::External(_) | Llm::Docker { .. } => {
-                let lease = match &opts.llm {
-                    Llm::Docker {
-                        image,
-                        gguf,
-                        port,
-                        extra,
-                    } => Lease::start(image, &opts.models, gguf, *port, extra).await?,
-                    Llm::External(url) => Lease::external(url),
-                    Llm::Seq2Seq { .. } => unreachable!(),
-                };
-                let outcome =
-                    translate::translate(&lease, &cues, &Default::default(), |n, total| {
-                        eprint!("\r  translate {n}/{total} cues   ");
-                        let _ = std::io::stderr().flush();
-                    })
-                    .await;
-                lease.stop().await;
-                outcome?
-            }
-        };
-        let usage = report.usage;
-        let elapsed = t.elapsed().as_secs_f64();
-        let json_lines: Vec<Value> = lines
-            .iter()
-            .map(|l| json!({ "ar": l.ar, "en": l.en, "uncertain": l.uncertain, "overcorrected": l.overcorrected }))
-            .collect();
-        tokio::fs::write(
-            &p.translation,
-            serde_json::to_vec_pretty(&json!({ "lines": json_lines }))?,
-        )
-        .await?;
-        stats.insert(
-            "translate".into(),
-            json!({
+            let elapsed = t.elapsed().as_secs_f64();
+            let usage = report.usage;
+            Ok(json!({
                 "elapsed_s": round1(elapsed),
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
@@ -189,53 +253,41 @@ pub async fn run(opts: Options) -> Result<()> {
                 "overcorrected": lines.iter().filter(|l| l.overcorrected).count(),
                 "slipped": report.slipped,
                 "shortened": report.shortened,
-            }),
-        );
-        eprintln!();
-        done("translate", t);
+            }))
+        }
+        Stage::Render => {
+            let cues = srt::parse(&tokio::fs::read_to_string(&p.cues).await?)?;
+            let translation: Value =
+                serde_json::from_str(&tokio::fs::read_to_string(&p.translation).await?)?;
+            let lines: Vec<Translated> = translation["lines"]
+                .as_array()
+                .context("translation.json has no lines")?
+                .iter()
+                .map(|l| Translated {
+                    ar: l["ar"].as_str().unwrap_or_default().to_owned(),
+                    en: l["en"].as_str().unwrap_or_default().to_owned(),
+                    uncertain: l["uncertain"].as_bool().unwrap_or(false),
+                    overcorrected: l["overcorrected"].as_bool().unwrap_or(false),
+                })
+                .collect();
+            if lines.len() != cues.len() {
+                bail!(
+                    "translation has {} lines for {} cues; redo the translate stage",
+                    lines.len(),
+                    cues.len()
+                );
+            }
+            let (ar, en) = render(&cues, &lines);
+            let too_long = en
+                .iter()
+                .filter(|c| c.text.lines().any(|l| l.chars().count() > 42))
+                .count();
+            tokio::fs::create_dir_all(p.out_ar.parent().expect("has parent")).await?;
+            tokio::fs::write(&p.out_ar, srt::write(&ar)).await?;
+            tokio::fs::write(&p.out_en, srt::write(&en)).await?;
+            Ok(json!({ "ar_cues": ar.len(), "en_cues": en.len(), "en_too_long": too_long }))
+        }
     }
-
-    let translation: Value =
-        serde_json::from_str(&tokio::fs::read_to_string(&p.translation).await?)?;
-    let lines: Vec<Translated> = translation["lines"]
-        .as_array()
-        .context("translation.json has no lines")?
-        .iter()
-        .map(|l| Translated {
-            ar: l["ar"].as_str().unwrap_or_default().to_owned(),
-            en: l["en"].as_str().unwrap_or_default().to_owned(),
-            uncertain: l["uncertain"].as_bool().unwrap_or(false),
-            overcorrected: l["overcorrected"].as_bool().unwrap_or(false),
-        })
-        .collect();
-    if lines.len() != cues.len() {
-        bail!(
-            "translation has {} lines for {} cues; rerun with --from translate",
-            lines.len(),
-            cues.len()
-        );
-    }
-
-    let (ar, en) = render(&cues, &lines);
-    let too_long = en
-        .iter()
-        .filter(|c| c.text.lines().any(|l| l.chars().count() > 42))
-        .count();
-    if too_long > 0 {
-        eprintln!("  warning: {too_long} English cues still exceed 2×42 characters");
-    }
-    tokio::fs::create_dir_all(p.out_ar.parent().expect("has parent")).await?;
-    tokio::fs::write(&p.out_ar, srt::write(&ar)).await?;
-    tokio::fs::write(&p.out_en, srt::write(&en)).await?;
-    eprintln!("  wrote {} and {}", p.out_ar.display(), p.out_en.display());
-
-    tokio::fs::write(
-        &stats_path,
-        serde_json::to_vec_pretty(&Value::Object(stats))?,
-    )
-    .await?;
-    eprintln!("  stats: {}", stats_path.display());
-    Ok(())
 }
 
 /// Translates cue by cue with the worker's `mt` stage. The Arabic track keeps
@@ -244,6 +296,7 @@ async fn translate_seq2seq(
     opts: &Options,
     cues: &[Cue],
     model: &str,
+    progress: &(dyn Fn(f64, &str) + Sync),
 ) -> Result<(Vec<Translated>, translate::Report)> {
     let dir = opts.work.join("mt");
     tokio::fs::create_dir_all(&dir).await?;
@@ -257,7 +310,7 @@ async fn translate_seq2seq(
             json!({ "lines": lines_path }),
             &dir,
             json!({ "model": model }),
-            progress("translate"),
+            progress,
         )
         .await?;
     let mt_path = result["outputs"]["mt"]
@@ -340,21 +393,6 @@ async fn extract_audio(media: &Path, audio: &Path) -> Result<()> {
         bail!("ffmpeg failed to extract audio from {}", media.display());
     }
     Ok(())
-}
-
-fn progress(stage: &'static str) -> impl Fn(f64, &str) {
-    move |pct, msg| {
-        eprint!("\r  {stage:<9} {pct:>5.1}%  {msg:<40}");
-        let _ = std::io::stderr().flush();
-    }
-}
-
-fn done(stage: &str, t: Instant) {
-    eprintln!(
-        "\r  {stage:<9} done in {:.1}s{:<40}",
-        t.elapsed().as_secs_f64(),
-        ""
-    );
 }
 
 fn secs(t: Instant) -> f64 {
