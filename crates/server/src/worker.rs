@@ -4,6 +4,7 @@
 //! envelope to `request.json`, start one process per stage, and read
 //! `progress` events followed by exactly one `result` or `error` from stdout.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -80,12 +81,26 @@ impl Launcher {
                 models,
             } => {
                 let mut cmd = Command::new("docker");
-                cmd.args(["run", "--rm", "--gpus", "all", "-e", "HF_TOKEN", "-v"])
-                    .arg(format!("{0}:{0}", data.display()))
-                    .arg("-v")
-                    .arg(format!("{}:/models", models.display()))
-                    .arg(image)
-                    .arg(&request_path);
+                // Run as the owner of the data dir so artifacts aren't root-owned.
+                let meta = std::fs::metadata(data)?;
+                cmd.args([
+                    "run",
+                    "--rm",
+                    "--gpus",
+                    "all",
+                    "-e",
+                    "HF_TOKEN",
+                    "-e",
+                    "HOME=/tmp",
+                ])
+                .arg("--user")
+                .arg(format!("{}:{}", meta.uid(), meta.gid()))
+                .arg("-v")
+                .arg(format!("{0}:{0}", data.display()))
+                .arg("-v")
+                .arg(format!("{}:/models", models.display()))
+                .arg(image)
+                .arg(&request_path);
                 cmd
             }
             Self::Local { python } => {

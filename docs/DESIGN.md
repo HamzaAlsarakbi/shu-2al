@@ -667,6 +667,33 @@ en_fit = true
 
 ---
 
+## 13a. M1 measurements (2026-10-30, RTX 3070, 5:10 dialogue clip from ضيعة ضايعة S1E2)
+
+| Stage | Warm time | Peak VRAM | Notes |
+|---|---|---|---|
+| ASR: Silero VAD + Cohere Transcribe Arabic (bf16, batch 8) | 8.4 s (RTF 0.027, ~37× real time) | 4.4 GB | 25 chunks covering 272 s of speech. Arabic is readable and punctuated, even in coastal dialect. |
+| Align: wav2vec2-xlsr-53-arabic CTC | 3.5 s | 0.85 GB | 2 of 25 segments failed and fell back to proportional timing. |
+| Cues | < 0.1 s | — | 70 cues |
+| Translate: Qwen3.5-9B Q4_K_M, llama-server | 76 s (63 tok/s) | 5.9 GB | Includes about 10 s of server start. GPU back to 10 MiB afterwards. |
+| **Total** | **99 s** | | Projects to **about 13 min per 45-min episode**, about 6.5 h for a 30-episode overnight run. |
+
+**Lessons:**
+- Small models loop inside schema-constrained JSON strings. The first run took 802 s because three runaway generations each hit the 8192-token cap.
+- Fixed with: the DRY sampler, exact `minItems`/`maxItems`, `maxLength` on strings, a token budget proportional to batch size, and batches of at most 25.
+- `docker --env-file` keeps the quotes around `.env` values, so tokens go through dotenvy and `-e NAME`.
+- Worker containers run as the data dir's owner so artifacts aren't root-owned.
+
+**Quality (local 9B):**
+- It gets the gist on roughly half the lines.
+- It often misses stock Syrian idioms («ما بتقصر», «يقطع عمرك»).
+- About 30% of English cues overflow 2×42 characters even with a per-cue `max_chars` budget.
+- It can drift one cue out of step in lyric-heavy passages.
+
+**Next quality levers, still local:**
+1. A shorten pass for overflowing cues.
+2. A drift check comparing each source line with its translation.
+3. A larger mixture-of-experts model with expert offload to the 62 GB of system RAM (Qwen3.6-35B-A3B or Jais-3-MoVA-36B-A4B).
+
 ## 14. Risks and open items
 
 | Risk | Mitigation |

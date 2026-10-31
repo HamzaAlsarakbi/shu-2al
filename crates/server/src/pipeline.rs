@@ -199,6 +199,15 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 
     let (ar, en) = render(&cues, &lines);
+    let too_long = en
+        .iter()
+        .filter(|c| c.text.lines().any(|l| l.chars().count() > 42))
+        .count();
+    if too_long > 0 {
+        eprintln!(
+            "  warning: {too_long} English cues exceed 2×42 characters (shorten pass not built yet)"
+        );
+    }
     tokio::fs::create_dir_all(p.out_ar.parent().expect("has parent")).await?;
     tokio::fs::write(&p.out_ar, srt::write(&ar)).await?;
     tokio::fs::write(&p.out_en, srt::write(&en)).await?;
@@ -213,33 +222,39 @@ pub async fn run(opts: Options) -> Result<()> {
     Ok(())
 }
 
-/// Builds the two tracks on the shared timing. Cues the translator emptied
-/// (non-speech) are dropped from both. Arabic lines start with an RLM so
-/// trailing punctuation renders on the correct side in LTR-default players.
+/// Builds the two tracks on the shared timing. Each track drops the cues it
+/// has no text for (non-speech). Arabic lines start with an RLM so trailing
+/// punctuation renders on the correct side in LTR-default players.
 fn render(cues: &[Cue], lines: &[Translated]) -> (Vec<Cue>, Vec<Cue>) {
     let (mut ar, mut en) = (Vec::new(), Vec::new());
     for (cue, line) in cues.iter().zip(lines) {
-        if line.ar.trim().is_empty() && line.en.trim().is_empty() {
-            continue;
+        let ar_text = clean(&line.ar);
+        let en_text = clean(&line.en);
+        if !ar_text.is_empty() {
+            let rtl = segment::break_lines(&ar_text, 42)
+                .lines()
+                .map(|l| format!("\u{200F}{l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ar.push(Cue::new(cue.start, cue.end, rtl));
         }
-        let ar_text = if line.ar.trim().is_empty() {
-            cue.text.replace('\n', " ")
-        } else {
-            line.ar.clone()
-        };
-        let ar_text = segment::break_lines(&ar_text, 42)
-            .lines()
-            .map(|l| format!("\u{200F}{l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ar.push(Cue::new(cue.start, cue.end, ar_text));
-        en.push(Cue::new(
-            cue.start,
-            cue.end,
-            segment::break_lines(&line.en, 42),
-        ));
+        if !en_text.is_empty() {
+            en.push(Cue::new(
+                cue.start,
+                cue.end,
+                segment::break_lines(&en_text, 42),
+            ));
+        }
     }
     (ar, en)
+}
+
+/// Strips lyric and music markers some ASR models emit, and extra spaces.
+fn clean(text: &str) -> String {
+    text.replace(['#', '♪', '♫'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn extract_audio(media: &Path, audio: &Path) -> Result<()> {

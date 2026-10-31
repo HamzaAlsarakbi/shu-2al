@@ -86,11 +86,17 @@ impl Lease {
         system: &str,
         user: &str,
         schema: &Value,
+        max_tokens: u32,
     ) -> Result<(Value, Usage)> {
         let body = json!({
             "model": "local",
             "temperature": 0.3,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
+            // Small models loop inside constrained JSON strings; DRY penalizes
+            // repeating sequences without hurting normal text.
+            "dry_multiplier": 0.8,
+            "dry_base": 1.75,
+            "dry_allowed_length": 3,
             "chat_template_kwargs": { "enable_thinking": false },
             "response_format": {
                 "type": "json_schema",

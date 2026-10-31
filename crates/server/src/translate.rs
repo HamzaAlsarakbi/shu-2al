@@ -25,6 +25,7 @@ Return exactly one object per input cue, with the same id, in the same order. Ne
 
 "en": natural, idiomatic English a viewer can read at subtitle speed.
 - When a sentence runs across several cues, understand the whole sentence first, then split the English across those cues in the same order, so each cue carries the part of the meaning it speaks. End a cue that breaks mid-sentence with "…" and start the continuation with "…".
+- Each cue has "max_chars": how many characters a viewer can read while it is on screen. Keep "en" within it. Condense: drop filler, repetition and words the picture makes obvious, but keep the meaning and tone.
 - Translate meaning and tone, not words. Contractions are fine. Short Arabic gets short English.
 - Keep a little flavor where the meaning is obvious: habibi, yalla, wallah, inshallah, Abu/Umm + name. Otherwise use the natural English (تقبرني → "I adore you", يا خالتي → "Auntie", الله يرحم والديك → "Bless you").
 - Never translate names. Match profanity and insults at equal severity; do not soften.
@@ -33,7 +34,9 @@ Return exactly one object per input cue, with the same id, in the same order. Ne
 
 Also return "scene_summary": at most two sentences describing who is talking and what is happening, for the next batch."#;
 
-fn schema() -> Value {
+/// Reply schema for a batch of `n` cues. Exact array length and capped string
+/// lengths stop runaway generations at the grammar level.
+fn schema(n: usize) -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -41,19 +44,21 @@ fn schema() -> Value {
         "properties": {
             "lines": {
                 "type": "array",
+                "minItems": n,
+                "maxItems": n,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["id", "ar", "en", "uncertain"],
                     "properties": {
                         "id": { "type": "integer" },
-                        "ar": { "type": "string" },
-                        "en": { "type": "string" },
+                        "ar": { "type": "string", "maxLength": 300 },
+                        "en": { "type": "string", "maxLength": 300 },
                         "uncertain": { "type": "boolean" }
                     }
                 }
             },
-            "scene_summary": { "type": "string" }
+            "scene_summary": { "type": "string", "maxLength": 400 }
         }
     })
 }
@@ -95,7 +100,7 @@ impl Default for Settings {
         Self {
             scene_gap_ms: 4000,
             batch_min: 10,
-            batch_max: 40,
+            batch_max: 25,
             context_cues: 8,
             overcorrection_cer: 0.4,
         }
@@ -114,7 +119,6 @@ pub async fn translate(
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()?;
-    let schema = schema();
     let mut out: Vec<Option<Translated>> = vec![None; cues.len()];
     let mut usage = Usage::default();
     let mut summary = String::new();
@@ -129,13 +133,19 @@ pub async fn translate(
             .collect();
         let lines: Vec<Value> = range
             .clone()
-            .map(|i| json!({ "id": i + 1, "ar": cues[i].text.replace('\n', " ") }))
+            .map(|i| {
+                json!({
+                    "id": i + 1,
+                    "ar": cues[i].text.replace('\n', " "),
+                    "max_chars": reading_budget(&cues[i]),
+                })
+            })
             .collect();
         let user = json!({ "summary": summary, "previous": previous, "lines": lines }).to_string();
 
         let mut reply = None;
         for _ in 0..2 {
-            match request(lease, &http, &user, &schema, &range).await {
+            match request(lease, &http, &user, &range).await {
                 Ok((r, u)) => {
                     usage += u;
                     reply = Some(r);
@@ -186,10 +196,13 @@ async fn request(
     lease: &Lease,
     http: &reqwest::Client,
     user: &str,
-    schema: &Value,
     range: &Range<usize>,
 ) -> Result<((HashMap<usize, ReplyLine>, String), Usage)> {
-    let (value, usage) = lease.chat_json(http, SYSTEM, user, schema).await?;
+    // About 3× the tokens a cue normally needs, so a loop is cut off early.
+    let max_tokens = 300 + 150 * range.len() as u32;
+    let (value, usage) = lease
+        .chat_json(http, SYSTEM, user, &schema(range.len()), max_tokens)
+        .await?;
     let reply: Reply = serde_json::from_value(value)?;
     let by_id: HashMap<usize, ReplyLine> = reply.lines.into_iter().map(|l| (l.id, l)).collect();
     let missing: Vec<usize> = range
@@ -201,6 +214,12 @@ async fn request(
         bail!("reply is missing cue ids {missing:?}");
     }
     Ok(((by_id, reply.scene_summary), usage))
+}
+
+/// Characters a viewer can read during the cue: 17 per second, between 16 and
+/// two full lines (84).
+fn reading_budget(cue: &Cue) -> u64 {
+    (cue.duration_ms() * 17 / 1000).clamp(16, 84)
 }
 
 /// Splits cues into batches of `batch_min..=batch_max`, preferring to break
@@ -241,7 +260,7 @@ mod tests {
         cues.extend((22..72).map(cue_at));
         let settings = Settings::default();
         let b = batches(&cues, &settings);
-        assert_eq!(b, vec![0..12, 12..52, 52..62]);
+        assert_eq!(b, vec![0..12, 12..37, 37..62]);
         assert!(b.iter().all(|r| r.len() <= settings.batch_max));
     }
 
