@@ -694,6 +694,19 @@ en_fit = true
 2. A drift check comparing each source line with its translation.
 3. A larger mixture-of-experts model with expert offload to the 62 GB of system RAM (Qwen3.6-35B-A3B or Jais-3-MoVA-36B-A4B).
 
+### Translation bake-off (2026-10-30, same 70-cue clip)
+
+| Translator | Time for 70 cues | Per 45-min episode | Notes |
+|---|---|---|---|
+| Qwen3.5-9B Q4 + slip check + shorten pass | 138 s | ~20 min | Shorten pass fixed 19 of 21 overflowing cues. Weak on idioms. |
+| Qwen3.6-35B-A3B Q4, experts on CPU (`--cpu-moe`) | 319 s (33 tok/s) | ~45 min | Better on idioms (بخاطرك, أمانة يا جاري). Sometimes drops content or mistranslates names (عزرايلين → "Ezra family"). |
+| NLLB-1.3B, LoRA on UFAL + Levanti (161k pairs, 2.1 h on the 3070, 4.4 GB) | 10 s | ~1.5 min | chrF++ on held-out UFAL rose from 47.4 to 54.2, **but it is clearly worse on real drama**: literal and context-free ("pinch your teeth", "the Israelis"). UFAL is movie subtitles translated into dialect, not native Syrian speech. |
+
+**Decision:**
+- Keep the LLM path, with the 9B as the default for overnight bursts and the MoE as an opt-in quality mode.
+- The NLLB `mt` stage and `train_mt` stay as experiments. They become worth retrying once the editor has produced corrected pairs from real episodes.
+- The biggest remaining quality lever is the owner's own corrections: per-show glossary and few-shot examples (M3/M5).
+
 ## 14. Risks and open items
 
 | Risk | Mitigation |

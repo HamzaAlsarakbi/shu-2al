@@ -28,11 +28,16 @@ pub enum Stage {
 }
 
 pub enum Llm {
+    /// A seq2seq translation model run by the worker's `mt` stage (e.g. the
+    /// fine-tuned NLLB). `model` is a path inside the models mount.
+    Seq2Seq { model: String },
     /// Start llama-server in Docker for the translate stage.
     Docker {
         image: String,
         gguf: String,
         port: u16,
+        /// Extra llama-server flags, e.g. `--cpu-moe` for MoE expert offload.
+        extra: Vec<String>,
     },
     /// Use a server that's already running.
     External(String),
@@ -139,19 +144,30 @@ pub async fn run(opts: Options) -> Result<()> {
 
     if redo(Stage::Translate, &p.translation) {
         let t = Instant::now();
-        let lease = match &opts.llm {
-            Llm::External(url) => Lease::external(url),
-            Llm::Docker { image, gguf, port } => {
-                Lease::start(image, &opts.models, gguf, *port).await?
+        let (lines, report) = match &opts.llm {
+            Llm::Seq2Seq { model } => translate_seq2seq(&opts, &cues, model).await?,
+            Llm::External(_) | Llm::Docker { .. } => {
+                let lease = match &opts.llm {
+                    Llm::Docker {
+                        image,
+                        gguf,
+                        port,
+                        extra,
+                    } => Lease::start(image, &opts.models, gguf, *port, extra).await?,
+                    Llm::External(url) => Lease::external(url),
+                    Llm::Seq2Seq { .. } => unreachable!(),
+                };
+                let outcome =
+                    translate::translate(&lease, &cues, &Default::default(), |n, total| {
+                        eprint!("\r  translate {n}/{total} cues   ");
+                        let _ = std::io::stderr().flush();
+                    })
+                    .await;
+                lease.stop().await;
+                outcome?
             }
         };
-        let outcome = translate::translate(&lease, &cues, &Default::default(), |n, total| {
-            eprint!("\r  translate {n}/{total} cues   ");
-            let _ = std::io::stderr().flush();
-        })
-        .await;
-        lease.stop().await;
-        let (lines, usage) = outcome?;
+        let usage = report.usage;
         let elapsed = t.elapsed().as_secs_f64();
         let json_lines: Vec<Value> = lines
             .iter()
@@ -171,6 +187,8 @@ pub async fn run(opts: Options) -> Result<()> {
                 "tokens_per_s": round1(usage.completion_tokens as f64 / elapsed),
                 "uncertain": lines.iter().filter(|l| l.uncertain).count(),
                 "overcorrected": lines.iter().filter(|l| l.overcorrected).count(),
+                "slipped": report.slipped,
+                "shortened": report.shortened,
             }),
         );
         eprintln!();
@@ -204,9 +222,7 @@ pub async fn run(opts: Options) -> Result<()> {
         .filter(|c| c.text.lines().any(|l| l.chars().count() > 42))
         .count();
     if too_long > 0 {
-        eprintln!(
-            "  warning: {too_long} English cues exceed 2×42 characters (shorten pass not built yet)"
-        );
+        eprintln!("  warning: {too_long} English cues still exceed 2×42 characters");
     }
     tokio::fs::create_dir_all(p.out_ar.parent().expect("has parent")).await?;
     tokio::fs::write(&p.out_ar, srt::write(&ar)).await?;
@@ -220,6 +236,48 @@ pub async fn run(opts: Options) -> Result<()> {
     .await?;
     eprintln!("  stats: {}", stats_path.display());
     Ok(())
+}
+
+/// Translates cue by cue with the worker's `mt` stage. The Arabic track keeps
+/// the ASR text as-is (a seq2seq model can't correct or normalize it).
+async fn translate_seq2seq(
+    opts: &Options,
+    cues: &[Cue],
+    model: &str,
+) -> Result<(Vec<Translated>, translate::Report)> {
+    let dir = opts.work.join("mt");
+    tokio::fs::create_dir_all(&dir).await?;
+    let lines_path = dir.join("lines.json");
+    let lines: Vec<String> = cues.iter().map(|c| c.text.replace('\n', " ")).collect();
+    tokio::fs::write(&lines_path, serde_json::to_vec(&lines)?).await?;
+    let result = opts
+        .launcher
+        .run(
+            "mt",
+            json!({ "lines": lines_path }),
+            &dir,
+            json!({ "model": model }),
+            progress("translate"),
+        )
+        .await?;
+    let mt_path = result["outputs"]["mt"]
+        .as_str()
+        .context("mt stage returned no output")?;
+    let mt: Value = serde_json::from_str(&tokio::fs::read_to_string(mt_path).await?)?;
+    let en = mt["en"].as_array().context("mt.json has no en list")?;
+    if en.len() != cues.len() {
+        bail!("mt returned {} lines for {} cues", en.len(), cues.len());
+    }
+    let out = cues
+        .iter()
+        .zip(en)
+        .map(|(cue, en)| Translated {
+            ar: cue.text.replace('\n', " "),
+            en: en.as_str().unwrap_or_default().to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    Ok((out, translate::Report::default()))
 }
 
 /// Builds the two tracks on the shared timing. Each track drops the cues it

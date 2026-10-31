@@ -28,9 +28,18 @@ impl Lease {
 
     /// Starts llama-server with `gguf` (a path relative to `models`) and waits
     /// until it reports healthy.
-    pub async fn start(image: &str, models: &Path, gguf: &str, port: u16) -> Result<Self> {
+    pub async fn start(
+        image: &str,
+        models: &Path,
+        gguf: &str,
+        port: u16,
+        extra: &[String],
+    ) -> Result<Self> {
         let _ = docker(&["rm", "-f", CONTAINER]).await;
-        docker(&[
+        let port_map = format!("127.0.0.1:{port}:8080");
+        let models_mount = format!("{}:/models:ro", models.display());
+        let model_path = format!("/models/{gguf}");
+        let mut args: Vec<&str> = vec![
             "run",
             "-d",
             "--rm",
@@ -39,12 +48,12 @@ impl Lease {
             "--gpus",
             "all",
             "-p",
-            &format!("127.0.0.1:{port}:8080"),
+            &port_map,
             "-v",
-            &format!("{}:/models:ro", models.display()),
+            &models_mount,
             image,
             "-m",
-            &format!("/models/{gguf}"),
+            &model_path,
             "-ngl",
             "99",
             "-c",
@@ -52,9 +61,9 @@ impl Lease {
             "-fa",
             "on",
             "--jinja",
-        ])
-        .await
-        .context("starting llama-server")?;
+        ];
+        args.extend(extra.iter().map(String::as_str));
+        docker(&args).await.context("starting llama-server")?;
         let lease = Self {
             base_url: format!("http://127.0.0.1:{port}"),
             container: Some(CONTAINER.to_owned()),

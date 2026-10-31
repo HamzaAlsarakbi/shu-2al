@@ -17,6 +17,8 @@ models = [
   "silero-vad>=6.2",
   "ctc-forced-aligner",
 ]
+# Offline fine-tuning jobs (train_mt).
+train = ["peft>=0.17", "sacrebleu>=2.5"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14"]

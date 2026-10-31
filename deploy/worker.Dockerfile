@@ -15,9 +15,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY worker/pyproject.toml worker/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --extra models
+    uv sync --frozen --no-install-project --no-dev --extra models --extra train
 COPY worker/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra models
+    uv sync --frozen --no-dev --extra models --extra train
 
 ENTRYPOINT ["python", "-m", "shu2al_worker"]

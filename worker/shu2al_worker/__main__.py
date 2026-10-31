@@ -13,6 +13,7 @@ STAGES = {
     "align": "shu2al_worker.align",
     "doctor": "shu2al_worker.doctor",
     "mock": "shu2al_worker.mock",
+    "mt": "shu2al_worker.mt",
 }
 
 

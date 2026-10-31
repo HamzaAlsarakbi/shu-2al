@@ -115,12 +115,13 @@ pub async fn translate(
     cues: &[Cue],
     settings: &Settings,
     on_progress: impl Fn(usize, usize),
-) -> Result<(Vec<Translated>, Usage)> {
+) -> Result<(Vec<Translated>, Report)> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()?;
     let mut out: Vec<Option<Translated>> = vec![None; cues.len()];
     let mut usage = Usage::default();
+    let mut report = Report::default();
     let mut summary = String::new();
     let mut pending: VecDeque<Range<usize>> = batches(cues, settings).into();
 
@@ -143,17 +144,37 @@ pub async fn translate(
             .collect();
         let user = json!({ "summary": summary, "previous": previous, "lines": lines }).to_string();
 
+        // Keep the attempt with the fewest lines whose English doesn't match
+        // their Arabic (a "slip"); retry while any remain.
         let mut reply = None;
-        for _ in 0..2 {
+        let mut slipped: Vec<usize> = Vec::new();
+        let mut failures = 0;
+        while failures < 2 && (reply.is_none() || !slipped.is_empty()) {
             match request(lease, &http, &user, &range).await {
                 Ok((r, u)) => {
                     usage += u;
-                    reply = Some(r);
-                    break;
+                    let (bad, vu) = verify(lease, &http, cues, &r.0, &range)
+                        .await
+                        .unwrap_or_default();
+                    usage += vu;
+                    if reply.is_none() || bad.len() < slipped.len() {
+                        reply = Some(r);
+                        slipped = bad;
+                    }
+                    if !slipped.is_empty() {
+                        eprintln!(
+                            "  translate {range:?}: cues {slipped:?} don't match their Arabic"
+                        );
+                        failures += 1;
+                    }
                 }
-                Err(e) => eprintln!("  translate {range:?}: {e:#}"),
+                Err(e) => {
+                    eprintln!("  translate {range:?}: {e:#}");
+                    failures += 1;
+                }
             }
         }
+        report.slipped += slipped.len();
         match reply {
             Some((by_id, scene_summary)) => {
                 for i in range.clone() {
@@ -164,7 +185,7 @@ pub async fn translate(
                     out[i] = Some(Translated {
                         ar: line.ar.clone(),
                         en: line.en.clone(),
-                        uncertain: line.uncertain || overcorrected,
+                        uncertain: line.uncertain || overcorrected || slipped.contains(&(i + 1)),
                         overcorrected,
                     });
                 }
@@ -186,10 +207,140 @@ pub async fn translate(
             }
         }
     }
-    Ok((
-        out.into_iter().map(Option::unwrap_or_default).collect(),
-        usage,
-    ))
+    let mut out: Vec<Translated> = out.into_iter().map(Option::unwrap_or_default).collect();
+    report.shortened = shorten(lease, &http, &mut out, cues, &mut usage).await;
+    report.usage = usage;
+    Ok((out, report))
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Report {
+    pub usage: Usage,
+    /// Lines still flagged as not matching their Arabic after retries.
+    pub slipped: usize,
+    /// English lines rewritten to fit two subtitle lines.
+    pub shortened: usize,
+}
+
+const VERIFY: &str = "You check subtitle translations from Syrian Arabic to English. Each item has an Arabic line and its English subtitle. Return the ids whose English does not convey that Arabic line: it translates a neighbouring line instead, it is empty although the Arabic is speech, or it says something unrelated. Loose or condensed wording is fine; only flag real mismatches.";
+
+/// Asks the model which lines of a reply don't match their Arabic.
+async fn verify(
+    lease: &Lease,
+    http: &reqwest::Client,
+    cues: &[Cue],
+    by_id: &HashMap<usize, ReplyLine>,
+    range: &Range<usize>,
+) -> Result<(Vec<usize>, Usage)> {
+    let items: Vec<Value> = range
+        .clone()
+        .filter(|i| !cues[*i].text.trim().is_empty() || !by_id[&(i + 1)].en.is_empty())
+        .map(|i| json!({ "id": i + 1, "ar": cues[i].text.replace('\n', " "), "en": by_id[&(i + 1)].en }))
+        .collect();
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mismatched"],
+        "properties": {
+            "mismatched": { "type": "array", "maxItems": items.len(), "items": { "type": "integer" } }
+        }
+    });
+    let user = json!({ "items": items }).to_string();
+    let max_tokens = 50 + 8 * items.len() as u32;
+    let (value, usage) = lease
+        .chat_json(http, VERIFY, &user, &schema, max_tokens)
+        .await?;
+    let mut bad: Vec<usize> = value["mismatched"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_u64)
+                .map(|id| id as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+    bad.retain(|&id| id >= 1 && range.contains(&(id - 1)));
+    bad.sort_unstable();
+    bad.dedup();
+    Ok((bad, usage))
+}
+
+const SHORTEN: &str = "You condense English subtitles. Rewrite each line so it is at most max_chars characters, so it fits two subtitle lines. Keep the meaning, tone, names and any profanity; drop filler, repetition and anything the picture makes obvious. Return every id.";
+
+fn fits_two_lines(en: &str) -> bool {
+    subs::segment::break_lines(en, 42)
+        .lines()
+        .all(|l| l.chars().count() <= 42)
+}
+
+/// Rewrites English lines that don't fit two lines of 42 characters. Keeps a
+/// rewrite only if it is shorter. Returns how many lines it replaced.
+async fn shorten(
+    lease: &Lease,
+    http: &reqwest::Client,
+    out: &mut [Translated],
+    cues: &[Cue],
+    usage: &mut Usage,
+) -> usize {
+    let overflow: Vec<usize> = (0..out.len())
+        .filter(|&i| !fits_two_lines(&out[i].en))
+        .collect();
+    let mut replaced = 0;
+    for chunk in overflow.chunks(25) {
+        let items: Vec<Value> = chunk
+            .iter()
+            .map(|&i| {
+                let budget = reading_budget(&cues[i]).clamp(40, 84);
+                json!({ "id": i + 1, "en": out[i].en, "max_chars": budget })
+            })
+            .collect();
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["lines"],
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "minItems": chunk.len(),
+                    "maxItems": chunk.len(),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["id", "en"],
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "en": { "type": "string", "maxLength": 84 }
+                        }
+                    }
+                }
+            }
+        });
+        let user = json!({ "lines": items }).to_string();
+        let max_tokens = 100 + 60 * chunk.len() as u32;
+        let Ok((value, u)) = lease
+            .chat_json(http, SHORTEN, &user, &schema, max_tokens)
+            .await
+        else {
+            continue;
+        };
+        *usage += u;
+        for line in value["lines"].as_array().into_iter().flatten() {
+            let (Some(id), Some(en)) = (line["id"].as_u64(), line["en"].as_str()) else {
+                continue;
+            };
+            let Some(i) = (id as usize).checked_sub(1) else {
+                continue;
+            };
+            if chunk.contains(&i)
+                && !en.trim().is_empty()
+                && en.chars().count() < out[i].en.chars().count()
+            {
+                out[i].en = en.trim().to_owned();
+                replaced += 1;
+            }
+        }
+    }
+    replaced
 }
 
 async fn request(

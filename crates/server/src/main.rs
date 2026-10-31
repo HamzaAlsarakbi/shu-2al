@@ -24,7 +24,7 @@ enum Command {
     #[command(subcommand)]
     Subs(SubsCommand),
     /// Subtitle one episode end to end: writes <work>/out/<name>.{ar,en}.srt.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
 }
 
 #[derive(clap::Args)]
@@ -53,6 +53,10 @@ struct RunArgs {
     /// Use an already-running OpenAI-compatible server instead of starting one.
     #[arg(long)]
     llm_url: Option<String>,
+    /// Translate with a seq2seq model (e.g. fine-tuned NLLB) instead of the LLM.
+    /// Path inside the models mount, such as /models/mt/nllb-levantine.
+    #[arg(long, conflicts_with = "llm_url")]
+    mt_model: Option<String>,
     #[arg(long, default_value = "ghcr.io/ggml-org/llama.cpp:server-cuda")]
     llm_image: String,
     /// GGUF path relative to the models directory.
@@ -60,6 +64,9 @@ struct RunArgs {
     llm_model: String,
     #[arg(long, default_value_t = 8081)]
     llm_port: u16,
+    /// Extra llama-server flag (repeatable), e.g. --llm-arg=--cpu-moe
+    #[arg(long = "llm-arg", allow_hyphen_values = true)]
+    llm_args: Vec<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -94,7 +101,7 @@ async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     match Cli::parse().command {
         Command::Subs(cmd) => run_subs(cmd),
-        Command::Run(args) => run_episode(args).await,
+        Command::Run(args) => run_episode(*args).await,
     }
 }
 
@@ -204,12 +211,14 @@ async fn run_episode(args: RunArgs) -> Result<()> {
             python: args.python,
         },
     };
-    let llm = match args.llm_url {
-        Some(url) => pipeline::Llm::External(url),
-        None => pipeline::Llm::Docker {
+    let llm = match (args.llm_url, args.mt_model) {
+        (_, Some(model)) => pipeline::Llm::Seq2Seq { model },
+        (Some(url), None) => pipeline::Llm::External(url),
+        (None, None) => pipeline::Llm::Docker {
             image: args.llm_image,
             gguf: args.llm_model,
             port: args.llm_port,
+            extra: args.llm_args,
         },
     };
     pipeline::run(pipeline::Options {
