@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, subscribe, type Episode, type GpuStatus, type Live } from "./lib/api";
+  import Editor from "./Editor.svelte";
   import NewRequest from "./NewRequest.svelte";
   import QueueView from "./QueueView.svelte";
 
@@ -73,8 +74,10 @@
 
 {#if error}<p class="error">Can't reach the server: {error}</p>{/if}
 
-<main>
-  {#if route === "new"}
+<main class:wide={route.startsWith("episode/")}>
+  {#if route.startsWith("episode/")}
+    {#key route}<Editor id={Number(route.split("/")[1])} />{/key}
+  {:else if route === "new"}
     <NewRequest onqueued={() => (location.hash = "queue")} />
   {:else}
     <QueueView {episodes} {live} />

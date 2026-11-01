@@ -344,7 +344,7 @@ async fn translate_seq2seq(
 /// Builds the two tracks on the shared timing. Each track drops the cues it
 /// has no text for (non-speech). Arabic lines start with an RLM so trailing
 /// punctuation renders on the correct side in LTR-default players.
-fn render(cues: &[Cue], lines: &[Translated]) -> (Vec<Cue>, Vec<Cue>) {
+pub fn render(cues: &[Cue], lines: &[Translated]) -> (Vec<Cue>, Vec<Cue>) {
     let (mut ar, mut en) = (Vec::new(), Vec::new());
     for (cue, line) in cues.iter().zip(lines) {
         let ar_text = clean(&line.ar);

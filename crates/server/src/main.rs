@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 mod api;
 mod db;
+mod editor;
 mod llm;
 mod pipeline;
 mod queue;

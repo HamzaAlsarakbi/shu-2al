@@ -80,10 +80,56 @@ export const api = {
     call<GpuStatus>("/api/gpu", { method: "POST", body: JSON.stringify({ paused }) }),
 };
 
+export interface CueRow {
+  id: number;
+  ord: number;
+  start_ms: number;
+  end_ms: number;
+  ar_asr: string;
+  ar_text: string;
+  en_mt: string;
+  en_text: string;
+  uncertain: boolean;
+  status: "auto" | "edited" | "verified" | "deleted";
+}
+
+export interface GlossaryEntry {
+  id: number;
+  series: string;
+  ar: string;
+  en: string;
+}
+
+export interface EditorData {
+  episode: Episode;
+  cues: CueRow[];
+  glossary: GlossaryEntry[];
+  media: { proxy: boolean; peaks: boolean };
+  preparing: boolean;
+}
+
+export type CuePatch = Partial<Pick<CueRow, "ar_text" | "en_text" | "start_ms" | "end_ms" | "status">>;
+
+export const editorApi = {
+  load: (id: number) => call<EditorData>(`/api/episodes/${id}/editor`),
+  patch: (cueId: number, patch: CuePatch) =>
+    call<CueRow>(`/api/cues/${cueId}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  publish: (id: number) =>
+    call<{ ar_cues: number; en_cues: number }>(`/api/episodes/${id}/publish`, { method: "POST" }),
+  retranslate: (id: number) => call<void>(`/api/episodes/${id}/retranslate`, { method: "POST" }),
+  prepare: (id: number) => call<void>(`/api/episodes/${id}/prepare`, { method: "POST" }),
+  peaks: (id: number) =>
+    call<{ rate: number; duration: number; peaks: number[] }>(`/api/media/${id}/peaks.json`),
+  addGlossary: (series: string, ar: string, en: string) =>
+    call<GlossaryEntry[]>("/api/glossary", { method: "POST", body: JSON.stringify({ series, ar, en }) }),
+  deleteGlossary: (id: number) => call<void>(`/api/glossary/${id}`, { method: "DELETE" }),
+};
+
 export type ServerEvent =
   | { type: "episode"; episode: Episode; live: Live | null }
   | { type: "progress"; id: number; live: Live | null }
-  | { type: "gpu"; gpu: GpuStatus };
+  | { type: "gpu"; gpu: GpuStatus }
+  | { type: "media"; id: number };
 
 /** Subscribes to server-sent events; reconnects automatically. Returns an unsubscribe function. */
 export function subscribe(onEvent: (e: ServerEvent) => void): () => void {

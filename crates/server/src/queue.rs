@@ -50,6 +50,8 @@ pub struct Queue {
     pub wake: Notify,
     live: Mutex<HashMap<i64, Live>>,
     running: Mutex<HashSet<(i64, &'static str)>>,
+    /// Episodes whose editor media (proxy video, peaks) is being built.
+    preparing: Mutex<HashSet<i64>>,
     gpu: Mutex<GpuStatus>,
 }
 
@@ -86,6 +88,7 @@ impl Queue {
             wake: Notify::new(),
             live: Mutex::default(),
             running: Mutex::default(),
+            preparing: Mutex::default(),
             gpu: Mutex::new(GpuStatus {
                 paused,
                 ..Default::default()
@@ -226,7 +229,11 @@ impl Queue {
             Err(e) => Err(e),
         };
         let result = match outcome {
-            Ok(stats) => db::finish_stage(&self.pool, id, stage, &stats).await,
+            Ok(stats) => {
+                let done = db::finish_stage(&self.pool, id, stage, &stats).await;
+                self.after_stage(id, stage).await;
+                done
+            }
             Err(e) => {
                 let message = format!("{e:#}");
                 eprintln!("queue: #{id} {stage}: {message}");
@@ -278,12 +285,19 @@ impl Queue {
             return fetch(ep, &work, &progress).await;
         }
         let stage = Stage::from_name(stage).context("unknown stage")?;
-        // A brief for the series, if one exists at <data>/briefs/<series>.md.
+        // The series brief (<data>/briefs/<series>.md) plus what the user
+        // taught it: glossary and corrected/approved lines.
         let brief = match &ep.series {
             Some(series) => {
-                tokio::fs::read_to_string(self.cfg.data.join("briefs").join(format!("{series}.md")))
+                let file = tokio::fs::read_to_string(
+                    self.cfg.data.join("briefs").join(format!("{series}.md")),
+                )
+                .await
+                .unwrap_or_default();
+                let learned = crate::editor::learning_context(&self.pool, series)
                     .await
-                    .ok()
+                    .unwrap_or_default();
+                Some(file + &learned).filter(|b| !b.trim().is_empty())
             }
             None => None,
         };
@@ -319,6 +333,60 @@ impl Queue {
     }
 
     /// Path of the rendered subtitle file for `lang` ("ar" | "en"), if any.
+    pub fn work_dir(&self, id: i64) -> PathBuf {
+        self.cfg.data.join("episodes").join(id.to_string())
+    }
+
+    pub fn paths(&self, ep: &Episode) -> pipeline::Paths {
+        pipeline::Paths::new(&self.work_dir(ep.id), &file_name(ep))
+    }
+
+    /// Follow-up work after a stage succeeds.
+    async fn after_stage(self: &Arc<Self>, id: i64, stage: &str) {
+        let Ok(Some(ep)) = db::episode(&self.pool, id).await else {
+            return;
+        };
+        match stage {
+            "extract" => self.prepare_media(&ep),
+            "render" => {
+                if let Err(e) =
+                    crate::editor::import_and_publish(&self.pool, id, &self.paths(&ep)).await
+                {
+                    eprintln!("queue: importing cues for #{id}: {e:#}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn is_preparing(&self, id: i64) -> bool {
+        self.preparing.lock().unwrap().contains(&id)
+    }
+
+    /// Builds the editor's proxy video and waveform in the background (CPU only).
+    pub fn prepare_media(self: &Arc<Self>, ep: &Episode) {
+        if !self.preparing.lock().unwrap().insert(ep.id) {
+            return;
+        }
+        let queue = self.clone();
+        let work = self.work_dir(ep.id);
+        let media = media_path(ep, &work);
+        let id = ep.id;
+        tokio::spawn(async move {
+            let result = match media {
+                Ok(media) => crate::editor::prepare_media(&work, &media).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                eprintln!("queue: preparing editor media for #{id}: {e:#}");
+            }
+            queue.preparing.lock().unwrap().remove(&id);
+            let _ = queue
+                .events
+                .send(json!({ "type": "media", "id": id }).to_string());
+        });
+    }
+
     pub fn subtitle_path(&self, ep: &Episode, lang: &str) -> Option<PathBuf> {
         let work = self.cfg.data.join("episodes").join(ep.id.to_string());
         let paths = pipeline::Paths::new(&work, &file_name(ep));

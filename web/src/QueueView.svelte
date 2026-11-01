@@ -64,6 +64,7 @@
 
       <div class="actions">
         {#if e.state === "done"}
+          <a class="button" href={`#episode/${e.id}`}>Edit subtitles</a>
           <a href={`/api/episodes/${e.id}/subs/en`} download>English .srt</a>
           <a href={`/api/episodes/${e.id}/subs/ar`} download>Arabic .srt</a>
         {/if}

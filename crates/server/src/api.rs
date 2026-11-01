@@ -24,7 +24,17 @@ type AppState = Arc<Queue>;
 
 pub fn router(queue: AppState, web: PathBuf) -> Router {
     let spa = ServeDir::new(&web).fallback(ServeFile::new(web.join("index.html")));
+    // Episode files (proxy.mp4, peaks.json) with Range support for the editor.
+    let media = ServeDir::new(queue.cfg.data.join("episodes"));
     Router::new()
+        .nest_service("/api/media", media)
+        .route("/api/episodes/{id}/editor", get(editor))
+        .route("/api/episodes/{id}/publish", post(publish))
+        .route("/api/episodes/{id}/retranslate", post(retranslate))
+        .route("/api/episodes/{id}/prepare", post(prepare))
+        .route("/api/cues/{id}", axum::routing::patch(patch_cue))
+        .route("/api/glossary", get(list_glossary).post(add_glossary))
+        .route("/api/glossary/{id}", axum::routing::delete(delete_glossary))
         .route("/api/episodes", get(list).post(create))
         .route("/api/files", post(create_from_file))
         .route("/api/episodes/{id}/retry", post(retry))
@@ -307,4 +317,102 @@ async fn events(
         .filter_map(|msg| msg.ok())
         .map(|data| Ok(Event::default().data(data)));
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn episode_or_404(q: &Queue, id: i64) -> ApiResult<db::Episode> {
+    db::episode(&q.pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no episode #{id}").into())
+}
+
+/// Everything the editor page needs. Episodes rendered before the editor
+/// existed get their cues imported on first open.
+async fn editor(State(q): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let ep = episode_or_404(&q, id).await?;
+    let paths = q.paths(&ep);
+    let mut cues = db::cues(&q.pool, id).await?;
+    if cues.is_empty() && paths.translation.is_file() && paths.cues.is_file() {
+        crate::editor::import_and_publish(&q.pool, id, &paths).await?;
+        cues = db::cues(&q.pool, id).await?;
+    }
+    let glossary = match &ep.series {
+        Some(series) => db::glossary(&q.pool, series).await?,
+        None => Vec::new(),
+    };
+    let work = q.work_dir(id);
+    Ok(Json(json!({
+        "episode": ep,
+        "cues": cues,
+        "glossary": glossary,
+        "media": crate::editor::media_status(&work),
+        "preparing": q.is_preparing(id),
+    })))
+}
+
+async fn patch_cue(
+    State(q): State<AppState>,
+    Path(id): Path<i64>,
+    Json(patch): Json<db::CuePatch>,
+) -> ApiResult<Json<Value>> {
+    let (_, cue) = db::patch_cue(&q.pool, id, &patch)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no cue #{id}"))?;
+    Ok(Json(json!(cue)))
+}
+
+/// Rewrites the episode's SRT files from the edited cues.
+async fn publish(State(q): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let ep = episode_or_404(&q, id).await?;
+    let (ar, en) = crate::editor::publish(&q.pool, id, &q.paths(&ep)).await?;
+    Ok(Json(json!({ "ar_cues": ar, "en_cues": en })))
+}
+
+/// Re-runs translation with the glossary and approved lines; cues the user
+/// edited or verified are kept as they are.
+async fn retranslate(State(q): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    db::requeue_translation(&q.pool, id).await?;
+    q.broadcast_episode(id).await;
+    q.wake.notify_one();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn prepare(State(q): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    let ep = episode_or_404(&q, id).await?;
+    q.prepare_media(&ep);
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+struct SeriesQuery {
+    series: String,
+}
+
+async fn list_glossary(
+    State(q): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SeriesQuery>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(db::glossary(&q.pool, &query.series).await?)))
+}
+
+#[derive(Deserialize)]
+struct GlossaryRequest {
+    series: String,
+    ar: String,
+    en: String,
+}
+
+async fn add_glossary(
+    State(q): State<AppState>,
+    Json(req): Json<GlossaryRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.ar.trim().is_empty() || req.en.trim().is_empty() {
+        return Err(anyhow::anyhow!("both the Arabic and the English are needed").into());
+    }
+    db::add_glossary(&q.pool, &req.series, &req.ar, &req.en).await?;
+    Ok(Json(json!(db::glossary(&q.pool, &req.series).await?)))
+}
+
+async fn delete_glossary(State(q): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    db::delete_glossary(&q.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
