@@ -79,6 +79,8 @@ pub struct Options {
     pub launcher: Launcher,
     pub models: PathBuf,
     pub llm: Llm,
+    /// Show brief for the translator (see `translate::Settings::brief`).
+    pub brief: Option<String>,
 }
 
 pub struct Paths {
@@ -221,14 +223,17 @@ pub async fn run_stage(
                         Llm::External(url) => Lease::external(url),
                         Llm::Seq2Seq { .. } => unreachable!(),
                     };
-                    let outcome =
-                        translate::translate(&lease, &cues, &Default::default(), |n, total| {
-                            progress(
-                                100.0 * n as f64 / total.max(1) as f64,
-                                &format!("{n}/{total} cues"),
-                            )
-                        })
-                        .await;
+                    let settings = translate::Settings {
+                        brief: opts.brief.clone(),
+                        ..Default::default()
+                    };
+                    let outcome = translate::translate(&lease, &cues, &settings, |n, total| {
+                        progress(
+                            100.0 * n as f64 / total.max(1) as f64,
+                            &format!("{n}/{total} cues"),
+                        )
+                    })
+                    .await;
                     lease.stop().await;
                     outcome?
                 }

@@ -95,6 +95,9 @@ struct RunArgs {
     llm_model: String,
     #[arg(long, default_value_t = 8081)]
     llm_port: u16,
+    /// Show brief (synopsis + character names) for the translator, as a text file.
+    #[arg(long)]
+    brief: Option<PathBuf>,
     /// Extra llama-server flag (repeatable), e.g. --llm-arg=--cpu-moe
     #[arg(long = "llm-arg", allow_hyphen_values = true)]
     llm_args: Vec<String>,
@@ -253,8 +256,15 @@ async fn run_episode(args: RunArgs) -> Result<()> {
             extra: args.llm_args,
         },
     };
+    let brief = match &args.brief {
+        Some(path) => Some(
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        ),
+        None => None,
+    };
     pipeline::run(
         pipeline::Options {
+            brief,
             media: args.media,
             work,
             name,

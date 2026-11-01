@@ -30,6 +30,8 @@ Return exactly one object per input cue, with the same id, in the same order. Ne
 - Keep a little flavor where the meaning is obvious: habibi, yalla, wallah, inshallah, Abu/Umm + name. Otherwise use the natural English (تقبرني → "I adore you", يا خالتي → "Auntie", الله يرحم والديك → "Bless you").
 - Never translate names. Match profanity and insults at equal severity; do not soften.
 
+"show" (when present) describes the series: premise, characters and how they are related. Use character names exactly as given there, in both Arabic and English, and use it to resolve who is speaking to whom. When the recognizer garbles a name, restore it from this list.
+
 "previous" holds the cues just before this batch with their final English, for continuity only; do not return them. "summary" is the story so far.
 
 Also return "scene_summary": at most two sentences describing who is talking and what is happening, for the next batch."#;
@@ -93,6 +95,9 @@ pub struct Settings {
     pub context_cues: usize,
     /// Flag a cue when CER(asr → corrected) exceeds this.
     pub overcorrection_cer: f64,
+    /// Show brief: synopsis, characters and their relationships, recurring
+    /// terms. Sent with every batch.
+    pub brief: Option<String>,
 }
 
 impl Default for Settings {
@@ -103,6 +108,7 @@ impl Default for Settings {
             batch_max: 25,
             context_cues: 8,
             overcorrection_cer: 0.4,
+            brief: None,
         }
     }
 }
@@ -142,7 +148,13 @@ pub async fn translate(
                 })
             })
             .collect();
-        let user = json!({ "summary": summary, "previous": previous, "lines": lines }).to_string();
+        let user = json!({
+            "show": settings.brief,
+            "summary": summary,
+            "previous": previous,
+            "lines": lines,
+        })
+        .to_string();
 
         // Keep the attempt with the fewest lines whose English doesn't match
         // their Arabic (a "slip"); retry while any remain.

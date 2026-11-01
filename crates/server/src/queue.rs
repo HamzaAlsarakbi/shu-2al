@@ -278,7 +278,17 @@ impl Queue {
             return fetch(ep, &work, &progress).await;
         }
         let stage = Stage::from_name(stage).context("unknown stage")?;
+        // A brief for the series, if one exists at <data>/briefs/<series>.md.
+        let brief = match &ep.series {
+            Some(series) => {
+                tokio::fs::read_to_string(self.cfg.data.join("briefs").join(format!("{series}.md")))
+                    .await
+                    .ok()
+            }
+            None => None,
+        };
         let opts = pipeline::Options {
+            brief,
             media: media_path(ep, &work)?,
             name: file_name(ep),
             launcher: Launcher::Docker {
