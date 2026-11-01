@@ -64,6 +64,8 @@ pub enum Llm {
         image: String,
         gguf: String,
         port: u16,
+        /// Context size; large-KV models (Jais-3) need 8192 on 8 GB.
+        ctx: u32,
         /// Extra llama-server flags, e.g. `--cpu-moe` for MoE expert offload.
         extra: Vec<String>,
     },
@@ -215,10 +217,11 @@ pub async fn run_stage(
                             image,
                             gguf,
                             port,
+                            ctx,
                             extra,
                         } => {
                             progress(0.0, "starting llama-server");
-                            Lease::start(image, &opts.models, gguf, *port, extra).await?
+                            Lease::start(image, &opts.models, gguf, *port, *ctx, extra).await?
                         }
                         Llm::External(url) => Lease::external(url),
                         Llm::Seq2Seq { .. } => unreachable!(),

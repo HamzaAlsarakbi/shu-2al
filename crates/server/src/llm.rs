@@ -33,8 +33,10 @@ impl Lease {
         models: &Path,
         gguf: &str,
         port: u16,
+        ctx: u32,
         extra: &[String],
     ) -> Result<Self> {
+        let ctx = ctx.to_string();
         let _ = docker(&["rm", "-f", CONTAINER]).await;
         let port_map = format!("127.0.0.1:{port}:8080");
         let models_mount = format!("{}:/models:ro", models.display());
@@ -42,7 +44,6 @@ impl Lease {
         let mut args: Vec<&str> = vec![
             "run",
             "-d",
-            "--rm",
             "--name",
             CONTAINER,
             "--gpus",
@@ -57,7 +58,7 @@ impl Lease {
             "-ngl",
             "99",
             "-c",
-            "16384",
+            &ctx,
             "-fa",
             "on",
             "--jinja",
@@ -69,17 +70,24 @@ impl Lease {
             container: Some(CONTAINER.to_owned()),
         };
         let health = format!("{}/health", lease.base_url);
-        for _ in 0..120 {
+        for _ in 0..180 {
             if reqwest::get(&health)
                 .await
                 .is_ok_and(|r| r.status().is_success())
             {
                 return Ok(lease);
             }
+            // Fail fast (with its own error) if llama-server already exited.
+            if !running(CONTAINER).await {
+                let logs = tail_logs(CONTAINER).await;
+                lease.stop().await;
+                bail!("llama-server exited while loading the model:\n{logs}");
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        let logs = tail_logs(CONTAINER).await;
         lease.stop().await;
-        bail!("llama-server did not become healthy within 2 minutes")
+        bail!("llama-server did not become healthy within 3 minutes:\n{logs}")
     }
 
     pub async fn stop(&self) {
@@ -149,6 +157,44 @@ impl std::ops::AddAssign for Usage {
         self.prompt_tokens += rhs.prompt_tokens;
         self.completion_tokens += rhs.completion_tokens;
     }
+}
+
+async fn running(name: &str) -> bool {
+    tokio::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .await
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+}
+
+/// The last error-looking lines of a container's log.
+async fn tail_logs(name: &str) -> String {
+    let Ok(out) = tokio::process::Command::new("docker")
+        .args(["logs", "--tail", "40", name])
+        .output()
+        .await
+    else {
+        return String::new();
+    };
+    let text =
+        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+    let errors: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(" E ") || l.contains("error"))
+        .collect();
+    let lines = if errors.is_empty() {
+        text.lines().rev().take(5).collect::<Vec<_>>()
+    } else {
+        errors
+    };
+    lines
+        .iter()
+        .rev()
+        .take(5)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn docker(args: &[&str]) -> Result<()> {

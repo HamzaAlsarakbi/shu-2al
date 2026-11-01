@@ -95,6 +95,9 @@ struct RunArgs {
     llm_model: String,
     #[arg(long, default_value_t = 8081)]
     llm_port: u16,
+    /// llama-server context size.
+    #[arg(long, default_value_t = 16384)]
+    llm_ctx: u32,
     /// Show brief (synopsis + character names) for the translator, as a text file.
     #[arg(long)]
     brief: Option<PathBuf>,
@@ -253,6 +256,7 @@ async fn run_episode(args: RunArgs) -> Result<()> {
             image: args.llm_image,
             gguf: args.llm_model,
             port: args.llm_port,
+            ctx: args.llm_ctx,
             extra: args.llm_args,
         },
     };
