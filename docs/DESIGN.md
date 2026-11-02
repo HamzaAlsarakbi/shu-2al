@@ -725,6 +725,37 @@ en_fit = true
 - Cancel stops scheduling but lets a running stage finish.
 - The downloaded source is kept after extract, so the M3 editor can build its video proxy from it.
 
+### Distillation experiment (2026-11-01): fine-tune on one episode, test on the next
+
+**Setup:**
+- Reference English for الندم was written by a frontier model (Claude, in-session): all 303 lines of E1 for training, and 165 dialogue lines of E2 for testing.
+- QLoRA on the 3070 via `worker/shu2al_worker/ft_llm.py`, with E1 cut into 8-line windows plus the show brief.
+- The same prompt format for every model, scored with chrF++ against the reference on E2.
+
+| System | chrF++ on E2 |
+|---|---|
+| Pipeline today: Qwen3.5-9B Q4 + brief (JSON prompt, slip check) | **39.9** |
+| Qwen3-8B base (4-bit) | 37.3 |
+| Qwen3-8B + LoRA on E1, 1 epoch | 35.3 |
+| Qwen3-4B base | 32.9 |
+| Qwen3-4B + LoRA on E1, 3 epochs (loss fell to 0.01) | 31.0 |
+
+**Findings:**
+- **One episode of training data makes models worse on the next.** The 8B tuned model picked up some subtitle style («وليش أقلب خلقتك» → "Why are you looking at me like that, sir?"), but it also started inventing content.
+- **The training pairs teach that invention.** They map *raw ASR* Arabic (often garbled) to the English that was *meant*, so the model learns to write fluent lines that aren't in its input.
+- **Every local model misses common Damascene idioms:** دق طاولة, قلب خلقته, طالع نيّئ, بيّي.
+
+**What would make distillation viable:**
+- Thousands of lines across many episodes, not ~300.
+- Targets that pair *corrected* Arabic with the English, so the model isn't rewarded for inventing.
+- Mixing in broad dialect data (Levanti) so it doesn't overfit one episode.
+
+The editor's `cue_edits` table produces exactly that kind of corrected pair.
+
+**Training notes:**
+- On 8 GB the 8B needs logits computed only for the answer tokens (`logits_to_keep`) and must skip peft's `prepare_model_for_kbit_training`, which upcasts the embeddings to fp32 (+2.3 GB).
+- Peak was 7.0 GB; 76 steps took 2.4 min.
+
 ## 14. Risks and open items
 
 | Risk | Mitigation |
