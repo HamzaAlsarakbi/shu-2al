@@ -777,7 +777,25 @@ The editor's `cue_edits` table produces exactly that kind of corrected pair.
 - **Caveat:** the same annotator wrote the training English and the E2 references, so part of the gain is style match. A reference written independently, e.g. from the user's own editor fixes, would be the honest check.
 - Damascene idioms are still missed (قلب خلقته, طالع نيّئ). They are rare in the training data, which argues for more episodes and for the glossary.
 
-**Next:** annotate E7–E10 for round 3. To use the adapter in production, the pipeline needs a Qwen3-8B GGUF with the LoRA (`llama-server --lora`) and a parser for the ar+en format instead of the JSON schema.
+### Round 3 (2026-11-02): nine episodes, same recipe, and what the research says next
+
+Same recipe with E7–E10 annotated too: 3,671 lines (858 with corrected Arabic), 1,168 examples, 46 min of training at 7.1 GB peak.
+
+| System | chrF++ on E2 |
+|---|---|
+| Qwen3-8B + LoRA, round 2 (1,976 lines) | 45.5 |
+| Qwen3-8B + LoRA, round 3 (3,671 lines) | 45.7 |
+
+Doubling the data moved nothing measurable. Three research threads looked at why and what to do next: [recipe and base model](research/finetune-recipe.md), [data and evaluation](research/finetune-data-eval.md), [deployment](research/finetune-deploy.md). They agree on these points:
+
+- **The plateau is not established, and neither is any gain.** E2 has 165 references written by the same annotator as the training data, so it can only serve as a dev set. A real decision needs a frozen test set of 600–1,000 cues from 3–6 untouched episodes, with references that are independent (audio-checked or a different annotator). Report scene-level paired bootstrap intervals and COMET-22 alongside chrF++.
+- **Measure the ASR ceiling.** Translate ~100–150 dev lines from verified Arabic as well as raw ASR. That gap shows how much is left to win by fixing transcription rather than translation.
+- **The recipe is untuned.** It uses a constant 1e-4 learning rate, batch 1, no warmup and no checkpoint selection. Try warmup+cosine, LR 5e-5 and gradient accumulation 8 one at a time, seeded, then a two-epoch run with checkpoints. Keep r16/α32 and all seven modules. `ft_llm.py --epochs` defaults to 3, while every successful run used 1.
+- **Data: repairs and idioms over volume.** Every Levanti English target is GPT-4o output, so replace the random 2,000 with an audited, Syrian-first pool. Spend annotation on reviewed recoverable-ASR and idiom examples rather than more ordinary episodes.
+- **Retrieval before retraining.** Try 30–50 owner-approved idiom/name glossary entries and 2–4 retrieved similar training lines in the prompt. This needs no training and targets the misses directly.
+- **Deployment is the cheapest real test.** Convert the round-3 adapter to an F16 GGUF LoRA on the exact Qwen3-8B base (Q4_K_M), keep the trained ar+en line format under a GBNF grammar, use 8 cues + 3 context pairs, 8K context and one slot. Compare against a clean merge at Q4_K_M/Q5_K_M. Nobody has published how much an nf4-trained LoRA loses on a GGUF base, so this has to be measured. Production's `verify()` checks English against raw ASR, which can flag legitimate repairs.
+- **Base models to screen (inference only first):** ALLaM-7B-Instruct-preview and Command R7B Arabic 02-2025 have the best published Levantine→English numbers at this size, with Jais-2-8B-Chat next. Qwen3.5-9B stays the production control, but Unsloth discourages 4-bit QLoRA on it.
+- **Later:** turn editor corrections into SFT data first; try CPO only once there are 200–500 reviewed error pairs.
 
 ## 14. Risks and open items
 
