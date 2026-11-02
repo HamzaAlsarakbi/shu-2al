@@ -10,11 +10,13 @@ segment's own timing).
 from __future__ import annotations
 
 import time
+from itertools import pairwise
 
 from .asr import SR, load_audio, peak_vram_mb, pick_device
 from .protocol import Reporter, Request, write_json
 
 DEFAULT_MODEL = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+MAX_DENSITY = 0.7
 
 
 def run(req: Request, report: Reporter) -> dict:
@@ -38,6 +40,7 @@ def run(req: Request, report: Reporter) -> dict:
     model, tokenizer = load_alignment_model(
         device, model_path=req.params.get("model", DEFAULT_MODEL), dtype=dtype
     )
+    vocab = {k.lower() for k in tokenizer.get_vocab()} | {"<star>"}
     report.progress(5, "model loaded", force=True)
 
     segments = transcript["segments"]
@@ -54,6 +57,15 @@ def run(req: Request, report: Reporter) -> dict:
             with torch.inference_mode():
                 emissions, stride = generate_emissions(model, wav, batch_size=4)
             tokens, text_starred = preprocess_text(seg["text"], romanize=False, language="ara")
+            # The aligner's C++ code corrupts the heap (and kills the worker)
+            # when the text barely fits the audio: a CTC path needs a frame per
+            # token plus a blank between repeats. Real speech stays under ~0.6
+            # tokens per frame; denser text is an ASR repetition loop
+            # ("شوفو شوفو ..." x30 in 3 s), so it keeps the segment's own timing.
+            targets = [c for c in " ".join(tokens).split(" ") if c in vocab]
+            needed = len(targets) + sum(a == b for a, b in pairwise(targets))
+            if needed > MAX_DENSITY * emissions.shape[0]:
+                raise ValueError(f"{needed} CTC steps for {emissions.shape[0]} frames")
             path, scores, blank = get_alignments(emissions, tokens, tokenizer)
             spans = get_spans(tokens, path, blank)
             aligned = postprocess_results(text_starred, spans, stride, scores)
