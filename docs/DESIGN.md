@@ -725,10 +725,10 @@ en_fit = true
 - Cancel stops scheduling but lets a running stage finish.
 - The downloaded source is kept after extract, so the M3 editor can build its video proxy from it.
 
-### Distillation experiment (2026-11-01): fine-tune on one episode, test on the next
+### Annotate, then fine-tune: round 1 (2026-11-01), one episode, tested on the next
 
 **Setup:**
-- Reference English for الندم was written by a frontier model (Claude, in-session): all 303 lines of E1 for training, and 165 dialogue lines of E2 for testing.
+- Claude (in-session) annotated الندم episodes with reference English: all 303 lines of E1 for training, and 165 dialogue lines of E2 for testing. The local model is then run on that data and fine-tuned on it.
 - QLoRA on the 3070 via `worker/shu2al_worker/ft_llm.py`, with E1 cut into 8-line windows plus the show brief.
 - The same prompt format for every model, scored with chrF++ against the reference on E2.
 
@@ -745,7 +745,7 @@ en_fit = true
 - **The training pairs teach that invention.** They map *raw ASR* Arabic (often garbled) to the English that was *meant*, so the model learns to write fluent lines that aren't in its input.
 - **Every local model misses common Damascene idioms:** دق طاولة, قلب خلقته, طالع نيّئ, بيّي.
 
-**What would make distillation viable:**
+**What would make fine-tuning on annotations work:**
 - Thousands of lines across many episodes, not ~300.
 - Targets that pair *corrected* Arabic with the English, so the model isn't rewarded for inventing.
 - Mixing in broad dialect data (Levanti) so it doesn't overfit one episode.
@@ -753,8 +753,31 @@ en_fit = true
 The editor's `cue_edits` table produces exactly that kind of corrected pair.
 
 **Training notes:**
-- On 8 GB the 8B needs logits computed only for the answer tokens (`logits_to_keep`) and must skip peft's `prepare_model_for_kbit_training`, which upcasts the embeddings to fp32 (+2.3 GB).
-- Peak was 7.0 GB; 76 steps took 2.4 min.
+- On 8 GB the 8B must skip peft's `prepare_model_for_kbit_training`, which upcasts the embeddings to fp32 (+2.3 GB).
+- Loss is computed on the answer tokens only. The 151k-wide output layer runs in 64-token slices that are recomputed in backward, because full fp32 logits for a ~400-token answer OOM next to the model.
+- Round 1: peak 7.0 GB, 76 steps in 2.4 min. Round 2: peak 7.2 GB, 744 steps in 29 min, plus ~18 min to translate E2 with HF `generate`.
+
+### Annotate, then fine-tune: round 2 (2026-11-02), five episodes, corrected Arabic
+
+**What changed from round 1:**
+- Claude annotated four more episodes (E3–E6) and redid E1. Each line gets English *and* corrected Arabic where the ASR was wrong; lines too garbled to recover are skipped rather than guessed.
+- Result: 1,976 training lines (373 with corrected Arabic, ~110 skipped), plus 2,000 random Levanti sentence pairs.
+- The model now writes `N. ar: <corrected Arabic>` then `N. en: <English>` for each line, so it is rewarded for repairing the input rather than inventing past it.
+- Same test set as round 1 (E2, 165 reference lines), 1 epoch.
+
+| System | chrF++ on E2 |
+|---|---|
+| Pipeline today: Qwen3.5-9B Q4 + brief | 39.9 |
+| Qwen3-8B base, new ar+en format | 37.0 |
+| **Qwen3-8B + LoRA, round 2** | **45.5** |
+
+**Findings:**
+- **+8.5 over its own base and +5.6 over the production pipeline.** The ar+en format alone costs nothing (37.0 vs 37.3).
+- The gains are real comprehension, not just fluency: «لازم نكون كلياتنا» → "we need to be together" (base and pipeline: "at the college"). Two-speaker lines are split correctly, and none of the 165 outputs are empty.
+- **Caveat:** the same annotator wrote the training English and the E2 references, so part of the gain is style match. A reference written independently, e.g. from the user's own editor fixes, would be the honest check.
+- Damascene idioms are still missed (قلب خلقته, طالع نيّئ). They are rare in the training data, which argues for more episodes and for the glossary.
+
+**Next:** annotate E7–E10 for round 3. To use the adapter in production, the pipeline needs a Qwen3-8B GGUF with the LoRA (`llama-server --lora`) and a parser for the ar+en format instead of the JSON schema.
 
 ## 14. Risks and open items
 

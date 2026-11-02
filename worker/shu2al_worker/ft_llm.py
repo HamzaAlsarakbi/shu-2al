@@ -5,9 +5,11 @@ before/after evaluation on a held-out episode.
         --train /data/ft/train.json --test /data/ft/test.json \\
         --brief /data/ft/brief.md --out /data/ft/qwen3-8b
 
-train/test JSON: [{"ar": "...", "en": "..."}, ...] in episode order; `en` is
-the reference (e.g. a frontier model's translation). Test items without `en`
-are translated but not scored. Writes base.json, tuned.json and scores.json.
+train/test JSON: [{"ar": "...", "fix": "...", "en": "..."}, ...] in episode
+order. `ar` is the raw ASR line; `fix` (optional) is the annotated corrected
+Arabic; `en` is the annotated English. The model learns to output both the
+corrected Arabic and the English for each line. Test items without `en` are
+translated but not scored. Writes base.json, tuned.json and scores.json.
 """
 
 from __future__ import annotations
@@ -24,7 +26,10 @@ The Arabic comes from speech recognition and may contain errors; infer the inten
 from context. Translate meaning and tone, not word for word. Keep lines short.
 Use the character names from the show notes.
 A line may contain two speakers; mark each with "- ".
-Answer with exactly one numbered English line per numbered Arabic line, nothing else.
+For every numbered line, first write the corrected Arabic (fix recognition errors, keep the
+dialect), then the English, exactly like this and nothing else:
+1. ar: <corrected Arabic>
+1. en: <English>
 
 Show notes:
 """
@@ -53,17 +58,29 @@ def user_prompt(context: list[dict], chunk: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def corrected(c: dict) -> str:
+    return c.get("fix", c["ar"])
+
+
 def answer(chunk: list[dict]) -> str:
-    return "\n".join(f"{i + 1}. {c['en']}" for i, c in enumerate(chunk))
+    return "\n".join(
+        f"{i + 1}. ar: {corrected(c)}\n{i + 1}. en: {c['en']}" for i, c in enumerate(chunk)
+    )
 
 
 def parse(text: str, n: int) -> list[str]:
-    found = {}
+    """English per line from `N. en: ...` (falls back to bare `N. ...`)."""
+    en, bare = {}, {}
     for line in text.splitlines():
-        m = re.match(r"\s*(\d+)[.)]\s*(.*)", line)
-        if m and 1 <= int(m.group(1)) <= n:
-            found.setdefault(int(m.group(1)), m.group(2).strip())
-    return [found.get(i + 1, "") for i in range(n)]
+        m = re.match(r"\s*(\d+)[.)]\s*(?:(ar|en)\s*:)?\s*(.*)", line, re.IGNORECASE)
+        if not m or not 1 <= int(m.group(1)) <= n:
+            continue
+        k, tag, body = int(m.group(1)), (m.group(2) or "").lower(), m.group(3).strip()
+        if tag == "en":
+            en.setdefault(k, body)
+        elif not tag:
+            bare.setdefault(k, body)
+    return [en.get(i + 1, bare.get(i + 1, "")) for i in range(n)]
 
 
 def messages(brief: str, context, chunk, with_answer: bool) -> list[dict]:
@@ -96,7 +113,7 @@ def translate(model, tok, brief: str, items: list[dict], label: str) -> list[str
         enc = tok(prompt, return_tensors="pt").to(model.device)
         with torch.inference_mode():
             gen = model.generate(
-                **enc, max_new_tokens=60 * len(chunk), do_sample=False, repetition_penalty=1.05
+                **enc, max_new_tokens=120 * len(chunk), do_sample=False, repetition_penalty=1.05
             )
         text = tok.decode(gen[0][enc["input_ids"].shape[1] :], skip_special_tokens=True)
         out += parse(text, len(chunk))
@@ -135,7 +152,34 @@ def load_model(base: str):
     return model, tok
 
 
-def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, rank: int):
+def answer_loss(model, ids, n_answer: int, slice_len: int = 64):
+    """Mean cross-entropy over the answer tokens only.
+
+    The decoder runs once; its hidden states then go through the 151k-wide
+    output layer a slice at a time, and each slice's logits are recomputed in
+    backward instead of kept. Full fp32 logits for a ~400-token answer don't
+    fit next to an 8B model in 8 GB.
+    """
+    import torch
+    from torch.utils.checkpoint import checkpoint
+
+    inner = model.get_base_model()
+    hidden = inner.model(input_ids=ids[None]).last_hidden_state[0, -n_answer - 1 : -1]
+    targets = ids[-n_answer:]
+
+    def piece(h, t):
+        return torch.nn.functional.cross_entropy(inner.lm_head(h).float(), t, reduction="sum")
+
+    total = sum(
+        checkpoint(
+            piece, hidden[i : i + slice_len], targets[i : i + slice_len], use_reentrant=False
+        )
+        for i in range(0, n_answer, slice_len)
+    )
+    return total / n_answer
+
+
+def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, rank: int, extra=()):
     import torch
     from peft import LoraConfig, get_peft_model
 
@@ -163,7 +207,12 @@ def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, ran
     )
     model.print_trainable_parameters()
     examples = []
-    for context, chunk in windows(items, WINDOW // 2):
+    # Episode windows with context, plus context-free batches of general
+    # dialect sentences (already clean, so their Arabic is unchanged).
+    batches = windows(items, WINDOW // 2) + [
+        ([], list(extra[i : i + WINDOW])) for i in range(0, len(extra), WINDOW)
+    ]
+    for context, chunk in batches:
         full = tok.apply_chat_template(
             messages(brief, context, chunk, True), tokenize=False, enable_thinking=False
         )
@@ -180,8 +229,6 @@ def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, ran
         f"training examples: {len(examples)}, longest {max(len(i) for i, _ in examples)} tokens",
         flush=True,
     )
-    loss_fn = torch.nn.CrossEntropyLoss()
-
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     model.train()
     step, total = 0, epochs * len(examples)
@@ -190,11 +237,7 @@ def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, ran
         order = torch.randperm(len(examples)).tolist()
         for i in order:
             ids, n_answer = examples[i]
-            ids = ids.to(model.device)
-            # Only the answer is learned, so only compute logits for it: with a
-            # 151k-token vocabulary, logits over the whole prompt don't fit in 8 GB.
-            logits = model(input_ids=ids[None], logits_to_keep=n_answer + 1).logits[0]
-            loss = loss_fn(logits[:-1].float(), ids[-n_answer:])
+            loss = answer_loss(model, ids.to(model.device), n_answer)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -221,6 +264,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--reuse-base", action="store_true", help="reuse base.json from an earlier run")
+    ap.add_argument(
+        "--extra", type=Path, help="extra [{ar, en}] sentence pairs (e.g. Levanti) to mix in"
+    )
+    ap.add_argument("--extra-n", type=int, default=2000)
     args = ap.parse_args()
 
     train_items = [
@@ -241,7 +288,14 @@ def main() -> None:
         base_out = translate(model, tok, brief, test_items, "base")
         base_path.write_text(json.dumps(base_out, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    model = train(model, tok, brief, train_items, args.epochs, args.lr, args.rank)
+    extra = []
+    if args.extra:
+        import random
+
+        extra = json.loads(args.extra.read_text(encoding="utf-8"))
+        random.Random(13).shuffle(extra)
+        extra = extra[: args.extra_n]
+    model = train(model, tok, brief, train_items, args.epochs, args.lr, args.rank, extra)
     tuned_out = translate(model, tok, brief, test_items, "tuned")
     (args.out / "tuned.json").write_text(
         json.dumps(tuned_out, ensure_ascii=False, indent=1), encoding="utf-8"
