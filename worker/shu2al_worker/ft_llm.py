@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -179,7 +180,29 @@ def answer_loss(model, ids, n_answer: int, slice_len: int = 64):
     return total / n_answer
 
 
-def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, rank: int, extra=()):
+def lr_factor(update: int, total: int, warmup: int, cosine: bool) -> float:
+    if update < warmup:
+        return (update + 1) / warmup
+    if not cosine:
+        return 1.0
+    return 0.5 * (1 + math.cos(math.pi * (update - warmup) / max(1, total - warmup)))
+
+
+def train(
+    model,
+    tok,
+    brief: str,
+    items: list[dict],
+    epochs: int,
+    lr: float,
+    rank: int,
+    extra=(),
+    warmup: float = 0.0,
+    cosine: bool = False,
+    accum: int = 1,
+    save_at: tuple[float, ...] = (),
+    out: Path | None = None,
+):
     import torch
     from peft import LoraConfig, get_peft_model
 
@@ -232,17 +255,27 @@ def train(model, tok, brief: str, items: list[dict], epochs: int, lr: float, ran
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     model.train()
     step, total = 0, epochs * len(examples)
+    updates = math.ceil(total / accum)
+    warmup_updates = int(warmup * updates)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda u: lr_factor(u, updates, warmup_updates, cosine)
+    )
+    save_steps = {round(epoch * len(examples)): epoch for epoch in save_at}
     started = time.monotonic()
     for epoch in range(epochs):
         order = torch.randperm(len(examples)).tolist()
         for i in order:
             ids, n_answer = examples[i]
             loss = answer_loss(model, ids.to(model.device), n_answer)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            opt.zero_grad(set_to_none=True)
+            (loss / accum).backward()
             step += 1
+            if step % accum == 0 or step == total:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                sched.step()
+                opt.zero_grad(set_to_none=True)
+            if step in save_steps and out is not None:
+                model.save_pretrained(out / f"lora-e{save_steps[step]:g}")
             if step % 20 == 0 or step == total:
                 peak = torch.cuda.max_memory_allocated() / 2**30
                 print(
@@ -260,9 +293,17 @@ def main() -> None:
     ap.add_argument("--test", type=Path, required=True)
     ap.add_argument("--brief", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=16)
+    ap.add_argument("--seed", type=int, default=13)
+    ap.add_argument("--warmup", type=float, default=0.0, help="fraction of updates to warm up over")
+    ap.add_argument("--cosine", action="store_true", help="decay the learning rate to 0")
+    ap.add_argument("--accum", type=int, default=1, help="examples per optimizer update")
+    ap.add_argument(
+        "--save-at", type=float, nargs="*", default=[], help="epochs to also save the adapter at"
+    )
+    ap.add_argument("--skip-eval", action="store_true", help="only train and save the adapter")
     ap.add_argument("--reuse-base", action="store_true", help="reuse base.json from an earlier run")
     ap.add_argument(
         "--extra", type=Path, help="extra [{ar, en}] sentence pairs (e.g. Levanti) to mix in"
@@ -280,9 +321,14 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     print(f"{args.base}: train {len(train_items)} lines, test {len(test_items)} lines", flush=True)
 
+    import torch
+
+    torch.manual_seed(args.seed)
     model, tok = load_model(args.base)
     base_path = args.out / "base.json"
-    if args.reuse_base and base_path.is_file():
+    if args.skip_eval:
+        base_out = []
+    elif args.reuse_base and base_path.is_file():
         base_out = json.loads(base_path.read_text(encoding="utf-8"))
     else:
         base_out = translate(model, tok, brief, test_items, "base")
@@ -295,12 +341,28 @@ def main() -> None:
         extra = json.loads(args.extra.read_text(encoding="utf-8"))
         random.Random(13).shuffle(extra)
         extra = extra[: args.extra_n]
-    model = train(model, tok, brief, train_items, args.epochs, args.lr, args.rank, extra)
+    model = train(
+        model,
+        tok,
+        brief,
+        train_items,
+        args.epochs,
+        args.lr,
+        args.rank,
+        extra,
+        warmup=args.warmup,
+        cosine=args.cosine,
+        accum=args.accum,
+        save_at=tuple(args.save_at),
+        out=args.out,
+    )
+    model.save_pretrained(args.out / "lora")
+    if args.skip_eval:
+        return
     tuned_out = translate(model, tok, brief, test_items, "tuned")
     (args.out / "tuned.json").write_text(
         json.dumps(tuned_out, ensure_ascii=False, indent=1), encoding="utf-8"
     )
-    model.save_pretrained(args.out / "lora")
 
     scores = {"base": chrf(base_out, test_items), "tuned": chrf(tuned_out, test_items)}
     (args.out / "scores.json").write_text(json.dumps(scores, indent=1))

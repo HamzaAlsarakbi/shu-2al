@@ -797,6 +797,40 @@ Doubling the data moved nothing measurable. Three research threads looked at why
 - **Base models to screen (inference only first):** ALLaM-7B-Instruct-preview and Command R7B Arabic 02-2025 have the best published Levantine→English numbers at this size, with Jais-2-8B-Chat next. Qwen3.5-9B stays the production control, but Unsloth discourages 4-bit QLoRA on it.
 - **Later:** turn editor corrections into SFT data first; try CPO only once there are 200–500 reviewed error pairs.
 
+### Round 3 results through llama.cpp, on an independent test set (2026-11-04)
+
+**Test set:** 898 lines (41 whole scenes, E11–E14) translated by GPT-6.1-Sol without access to the training annotations; recaps and lines that near-duplicate training data are excluded. 875 lines are scoreable and 23 are marked unrecoverable. The references are still provisional until the owner's audio check of 150 lines. They, like all annotations, stay out of this repo. E11–E12 is the dev split for choosing recipes; E13–E14 stays locked.
+
+**Quantization is what decides whether the adapter survives export.** On E2 (chrF++; the adapter was trained on an nf4 base):
+
+| Setup | Score | Speed | VRAM |
+|---|---|---|---|
+| HF nf4 + adapter, reloaded from disk | 45.65 | ~24 tok/s | ~7 GB |
+| Q4_K_M + adapter, scale 1 | 35.8 | 50 tok/s | 6.0 GB |
+| Q4_K_M + adapter, scale 0.5 | 43.8 | 53 tok/s | 6.0 GB |
+| Q6_K + adapter | 45.4 | 42 tok/s | 6.9 GB |
+| Q8_0 + adapter (partial offload) | 46.9 | 14 tok/s | 6.75 GB |
+| Q4_K_M base, no adapter | 37.8 | 66 tok/s | 6.0 GB |
+
+Scale 1.25 on Q4_K_M collapses to 25.1, so the adapter sits close to an edge on coarse bases. The rendered prompt and tokens match training exactly, and the repetition penalty is not the cause. In this llama-server build, `"lora": []` leaves the adapter at its default scale; use `{"id": 0, "scale": 0}` to turn it off.
+
+**On the independent test set** (875 lines, 95% interval from a paired scene bootstrap, grammar on, 4K context):
+
+| Comparison | chrF++ | Difference | 95% interval |
+|---|---|---|---|
+| Q6_K + round 3 vs production Qwen3.5-9B | 42.01 vs 38.85 | +3.15 | +0.74 to +5.72 |
+| Q6_K + round 3 vs Q6_K base | 42.01 vs 36.34 | +5.66 | +3.96 to +7.31 |
+| Round 3 vs round 2 (both Q6_K) | 42.01 vs 41.87 | +0.13 | -1.36 to +1.32 |
+| Q5_K_M vs Q6_K (round 3) | 41.75 vs 42.01 | -0.25 | -1.01 to +0.36 |
+| Q4_K_M at scale 0.5 vs Q6_K | 40.93 vs 42.01 | -1.08 | -2.24 to +0.09 |
+
+**What this establishes:**
+- The tuned model beats production on references it wasn't styled after, by about half of E2's apparent margin.
+- Doubling ordinary annotated episodes added nothing measurable, so the next gains have to come from elsewhere.
+- Q5_K_M + adapter is the deployment candidate: 6.1 GB, 46 tok/s, no detectable loss against Q6_K.
+
+**Not yet shown:** an end-to-end episode comparison. Tuned output has no reading-speed control and runs longer: 60 of 751 unflagged lines exceed 84 characters, against 16 for production, whose shorten pass handles this. COMET and the audio check are still to come.
+
 ## 14. Risks and open items
 
 | Risk | Mitigation |
