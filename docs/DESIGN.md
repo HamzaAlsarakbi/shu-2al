@@ -805,7 +805,7 @@ Doubling the data moved nothing measurable. Three research threads looked at why
 
 | Setup | Score | Speed | VRAM |
 |---|---|---|---|
-| HF nf4 + adapter, reloaded from disk | 45.65 | ~24 tok/s | ~7 GB |
+| HF nf4 + adapter, reloaded from disk | 45.65 | ~15 tok/s | not measured |
 | Q4_K_M + adapter, scale 1 | 35.8 | 50 tok/s | 6.0 GB |
 | Q4_K_M + adapter, scale 0.5 | 43.8 | 53 tok/s | 6.0 GB |
 | Q6_K + adapter | 45.4 | 42 tok/s | 6.9 GB |
@@ -830,6 +830,20 @@ Scale 1.25 on Q4_K_M collapses to 25.1, so the adapter sits close to an edge on 
 - Q5_K_M + adapter is the deployment candidate: 6.1 GB, 46 tok/s, no detectable loss against Q6_K.
 
 **Not yet shown:** an end-to-end episode comparison. Tuned output has no reading-speed control and runs longer: 60 of 751 unflagged lines exceed 84 characters, against 16 for production, whose shorten pass handles this. COMET and the audio check are still to come.
+
+**Recipe runs on the dev split** (E11–E12, 459 lines, Q5_K_M, one seed each, against the round-3 adapter's 42.19):
+
+| Change | chrF++ | Difference | 95% interval |
+|---|---|---|---|
+| None (seeded control) | 41.83 | -0.36 | -2.33 to +2.20 |
+| Warmup + cosine | 42.71 | +0.52 | -0.99 to +2.24 |
+| Warmup + cosine, LR 5e-5 | 41.25 | -0.94 | -3.48 to +1.45 |
+| Warmup + cosine, accumulation 8 | 40.32 | -1.87 | -4.02 to +0.29 |
+| Warmup + cosine, 2 epochs | 42.23 | +0.05 | -1.54 to +2.04 |
+| Same run, checkpoint at 0.5 epochs | 42.42 | +0.23 | -1.68 to +2.15 |
+| Same run, checkpoint at 1 epoch | 41.45 | -0.74 | -3.00 to +1.94 |
+
+No change is distinguishable from the existing adapter, and half an epoch of a longer schedule already matches two full epochs. Together with round 2 ≈ round 3, this says more data of the same kind and more optimizer tuning are not the next lever, as far as chrF++ against one reference can see. Keep the round-3 adapter; don't retrain for now.
 
 ## 14. Risks and open items
 
